@@ -1,0 +1,27 @@
+# 配置文件与数据库（避免将包含敏感域名、Token 及本地 SQLite 数据库提交至公开仓库）
+config.yaml
+/data
+*.db
+*.db-*
+
+# Go 编译生成的本地二进制产物
+/argus
+/ssl-monitor
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 调试与性能分析输出
+*.test
+*.out
+*.prof
+
+# 编辑器与操作系统临时文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

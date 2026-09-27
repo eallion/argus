@@ -1,0 +1,21 @@
+services:
+  argus:
+    image: eallion/argus:latest
+    build: .
+    container_name: argus
+    restart: unless-stopped
+    ports:
+      - "42905:42905"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+
+  # 可选扩展：Apprise 通知网关服务（支持飞书、钉钉、企微等 100+ 渠道）
+  # 如需启用，请取消以下注释并执行：docker compose up -d
+  # apprise:
+  #   image: caronc/apprise-api:latest
+  #   container_name: apprise-api
+  #   restart: unless-stopped
+  #   environment:
+  #     - TZ=Asia/Shanghai

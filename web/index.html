@@ -1,0 +1,1497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Argus - 现代化的极简轻量级 SSL 证书与域名到期监控守护系统，支持多渠道告警推送。" />
+  <title>Argus - SSL 证书与域名监控</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css?v=1.0.26" />
+  <script>
+    (function() {
+      try {
+        var theme = localStorage.getItem('argus_theme') || 'auto';
+        if (theme === 'dark' || theme === 'light') {
+          document.documentElement.setAttribute('data-theme', theme);
+        } else {
+          document.documentElement.removeAttribute('data-theme');
+        }
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <!-- Toast 容器 -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <!-- 初始化管理员向导模态框 -->
+  <div id="setup-view" class="auth-wrapper hidden">
+    <div class="auth-card glass-panel">
+      <div class="auth-header">
+        <div class="logo-badge">
+          <svg class="icon-brand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <circle cx="12" cy="12" r="6"></circle>
+            <circle cx="12" cy="12" r="2"></circle>
+          </svg>
+        </div>
+        <h1 class="auth-title">初始化 Argus 管理员</h1>
+        <p class="auth-subtitle">首次运行检测。请设置系统唯一的超级管理员账号与密码。</p>
+      </div>
+      <form id="setup-form" class="auth-form">
+        <div class="form-group">
+          <label for="setup-username">管理员用户名</label>
+          <input type="text" id="setup-username" required placeholder="例如: admin" autocomplete="username" />
+        </div>
+        <div class="form-group">
+          <label for="setup-password">登录密码</label>
+          <input type="password" id="setup-password" required minlength="6" placeholder="至少 6 位安全密码" autocomplete="new-password" />
+        </div>
+        <div class="form-group">
+          <label for="setup-confirm-password">确认密码</label>
+          <input type="password" id="setup-confirm-password" required minlength="6" placeholder="再次输入密码" autocomplete="new-password" />
+        </div>
+        <button type="submit" id="btn-submit-setup" class="btn btn-primary btn-block">创建账号并进入控制台</button>
+      </form>
+    </div>
+    <footer class="auth-footer setup-footer hidden"></footer>
+  </div>
+
+  <!-- 登录页面模态框 -->
+  <div id="login-view" class="auth-wrapper hidden">
+    <div class="auth-card glass-panel">
+      <div class="auth-header">
+        <div class="logo-badge">
+          <svg class="icon-brand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          </svg>
+        </div>
+        <h1 class="auth-title">登录 Argus 控制台</h1>
+        <p class="auth-subtitle">请输入管理员凭证以访问管理面板</p>
+      </div>
+
+      <!-- 常规密码登录表单 -->
+      <form id="login-form" class="auth-form">
+        <div class="form-group">
+          <label for="login-username">用户名</label>
+          <input type="text" id="login-username" required placeholder="管理员用户名" autocomplete="username" />
+        </div>
+        <div class="form-group">
+          <label for="login-password">密码</label>
+          <input type="password" id="login-password" required placeholder="请输入密码" autocomplete="current-password" />
+        </div>
+
+        <!-- Cloudflare Turnstile 容器 -->
+        <div id="turnstile-box" class="turnstile-box hidden">
+          <div id="turnstile-container"></div>
+          <div id="turnstile-passed-tag" class="turnstile-passed-tag hidden">
+            <svg class="icon-sm text-emerald" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <span>人机验证已通过</span>
+          </div>
+        </div>
+
+        <button type="submit" id="btn-submit-login" class="btn btn-primary btn-block">立即登录</button>
+      </form>
+
+      <!-- 2FA 动态口令验证视图（登录时若开启 2FA 则显示） -->
+      <form id="login-2fa-form" class="auth-form hidden">
+        <div class="form-group">
+          <label for="login-2fa-code">身份验证器 6 位动态口令</label>
+          <input type="text" id="login-2fa-code" required maxlength="6" pattern="[0-9]{6}" inputmode="numeric" placeholder="例如: 123456" autocomplete="one-time-code" />
+          <small class="form-help">请输入 Bitwarden、Google Authenticator 等 App 生成的动态验证码</small>
+        </div>
+        <button type="submit" id="btn-submit-2fa" class="btn btn-primary btn-block">验证并登录</button>
+        <button type="button" id="btn-cancel-2fa" class="btn btn-secondary btn-block">返回密码登录</button>
+      </form>
+
+      <!-- Passkey 快捷登录选项 -->
+      <div id="passkey-login-box" class="passkey-login-box">
+        <div class="auth-divider">
+          <span>或</span>
+        </div>
+        <button type="button" id="btn-passkey-login" class="btn btn-secondary btn-block">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 2l-2 2m-2-2l2 2"></path>
+            <circle cx="7.5" cy="15.5" r="5.5"></circle>
+            <path d="M16 8l4 4-2 2-2-2-2 2-2-2"></path>
+          </svg>
+          <span>使用 Passkey 快捷登录 (Bitwarden / 指纹)</span>
+        </button>
+      </div>
+    </div>
+    <footer class="auth-footer login-footer hidden"></footer>
+  </div>
+
+  <!-- 主控制台视图 -->
+  <div id="dashboard-view" class="dashboard-wrapper hidden">
+    <!-- 顶部导航栏 -->
+    <header class="app-header glass-panel">
+      <div class="header-left">
+        <a href="/" class="brand" id="brand-logo" title="Argus - 返回首页">
+          <svg class="icon-brand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <circle cx="12" cy="12" r="6"></circle>
+            <circle cx="12" cy="12" r="2"></circle>
+          </svg>
+          <span class="brand-title">Argus</span>
+        </a>
+        <span class="header-slogan">SSL 证书与域名监控</span>
+        <div class="status-indicator">
+          <span class="status-dot"></span>
+          <span class="status-text">监控守护中</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <button id="btn-check-all" class="btn btn-secondary btn-sm" title="触发所有目标立即重检">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 4v6h-6"></path>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+          </svg>
+          <span>全量检测</span>
+        </button>
+        <button id="btn-add-modal" class="btn btn-primary btn-sm">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span>添加目标</span>
+        </button>
+        <button id="btn-batch-modal" class="btn btn-secondary btn-sm" title="批量导入域名与数据备份">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          <span>导入与备份</span>
+        </button>
+        <button id="btn-theme-toggle" class="btn btn-ghost btn-icon" title="切换外观主题 (跟随系统 / 浅色 / 暗色)">
+          <!-- 图标由 app.js 动态渲染当前主题图标 -->
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+        </button>
+        <button id="btn-settings-modal" class="btn btn-ghost btn-icon" title="系统设置与安全">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+        <a href="https://github.com/eallion/argus" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-icon" title="GitHub 仓库">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+          </svg>
+        </a>
+        <button id="btn-logout" class="btn btn-ghost btn-icon" title="退出登录">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 主体内容 -->
+    <main class="main-content">
+      <!-- 统计指标网格 -->
+      <section class="kpi-grid">
+        <div class="kpi-card glass-panel" data-filter="all" role="button" tabindex="0" title="点击筛选：显示全部监控目标">
+          <div class="kpi-icon icon-blue">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="2" y1="12" x2="22" y2="12"></line>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+            </svg>
+          </div>
+          <div class="kpi-info">
+            <div class="kpi-label">监控目标总数</div>
+            <div id="kpi-total-domains" class="kpi-value">0</div>
+          </div>
+        </div>
+
+        <div class="kpi-card glass-panel" data-filter="healthy" role="button" tabindex="0" title="点击筛选：状态正常目标 (>30天)">
+          <div class="kpi-icon icon-green">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+              <polyline points="9 12 11 14 15 10"></polyline>
+            </svg>
+          </div>
+          <div class="kpi-info">
+            <div class="kpi-label">状态正常 (>30天)</div>
+            <div id="kpi-ssl-healthy" class="kpi-value text-emerald">0</div>
+          </div>
+        </div>
+
+        <div class="kpi-card glass-panel" data-filter="warning" role="button" tabindex="0" title="点击筛选：临期与告警目标">
+          <div class="kpi-icon icon-amber">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+          </div>
+          <div class="kpi-info">
+            <div class="kpi-label">临期与告警阶梯 (30/15/7/3)</div>
+            <div id="kpi-warning-count" class="kpi-value text-amber">0</div>
+          </div>
+        </div>
+
+        <div id="kpi-card-policy" class="kpi-card glass-panel" role="button" tabindex="0" title="点击查看告警策略配置">
+          <div class="kpi-icon icon-purple">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </div>
+          <div class="kpi-info">
+            <div class="kpi-label">告警阶梯策略</div>
+            <div id="kpi-policy" class="kpi-value-sm">阶梯: 30, 15, 7, 3 天</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 二级页面面包屑导航栏（当进入某主域名的子域名列表时显示） -->
+      <section id="breadcrumb-bar" class="breadcrumb-container glass-panel hidden">
+        <div class="breadcrumb-left">
+          <button type="button" id="btn-back-to-groups" class="btn btn-secondary btn-sm" title="返回主域名聚合列表">
+            <svg class="icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="19" y1="12" x2="5" y2="12"></line>
+              <polyline points="12 19 5 12 12 5"></polyline>
+            </svg>
+            <span>返回主域名列表</span>
+          </button>
+          <div class="breadcrumb-path">
+            <span class="crumb-link" id="crumb-link-root">主域名列表</span>
+            <span class="crumb-separator">/</span>
+            <span class="crumb-current font-mono" id="crumb-current-domain">example.com</span>
+          </div>
+        </div>
+        <div id="breadcrumb-domain-meta" class="breadcrumb-meta">
+          <!-- 动态渲染该主域名在二级页面的域名注册到期提示 -->
+        </div>
+      </section>
+
+      <!-- 列表控制工具栏 -->
+      <section class="table-toolbar">
+        <div class="toolbar-left">
+          <!-- 视图模式胶囊切换：主域名 / 全部目标 -->
+          <div class="view-mode-tabs" id="view-mode-tabs">
+            <button type="button" class="view-mode-tab active" data-view="groups" title="首页视图：仅显示主域名">主域名</button>
+            <button type="button" class="view-mode-tab" data-view="all" title="平铺视图：显示全部监控目标">全部目标</button>
+          </div>
+
+          <div class="search-box">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" id="search-input" placeholder="搜索域名..." />
+          </div>
+        </div>
+
+        <div class="filter-tabs">
+          <button class="filter-tab active" data-filter="all">全部 (<span id="count-all">0</span>)</button>
+          <button class="filter-tab" data-filter="warning">告警 (<span id="count-warning">0</span>)</button>
+          <button class="filter-tab" data-filter="healthy">正常 (<span id="count-healthy">0</span>)</button>
+        </div>
+      </section>
+
+      <!-- 域名列表表格 -->
+      <section class="table-container glass-panel">
+        <table class="data-table">
+          <thead id="domains-table-head">
+            <tr>
+              <th>主域名 (Apex Domain)</th>
+              <th>域名注册到期 (RDAP)</th>
+              <th>子域名监控概况</th>
+              <th>最近巡检时间</th>
+              <th class="text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody id="domains-table-body">
+            <tr>
+              <td colspan="5" class="empty-state">
+                <div class="spinner"></div>
+                <p>正在加载监控数据...</p>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- 分页控件栏 -->
+        <div id="table-pagination" class="table-pagination hidden">
+          <div class="pagination-info" id="pagination-info">
+            共 0 条记录 · 第 1 / 1 页
+          </div>
+          <div class="pagination-controls">
+            <button type="button" class="btn-page" id="btn-page-prev" title="上一页">&laquo; 上一页</button>
+            <div class="page-numbers" id="pagination-pages"></div>
+            <button type="button" class="btn-page" id="btn-page-next" title="下一页">下一页 &raquo;</button>
+          </div>
+          <div class="pagination-size">
+            <label for="page-size-select" class="text-xs text-muted">每页显示：</label>
+            <select id="page-size-select" class="page-size-select">
+              <option value="10">10 条/页</option>
+              <option value="20" selected>20 条/页</option>
+              <option value="50">50 条/页</option>
+              <option value="100">100 条/页</option>
+            </select>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 添加/编辑目标模态框 -->
+  <div id="modal-domain" class="modal-backdrop hidden">
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <h2 id="modal-domain-title" class="modal-title">添加目标</h2>
+        <button type="button" class="modal-close-icon" data-close-modal="modal-domain" title="关闭">&times;</button>
+      </div>
+      <form id="domain-form" class="modal-body">
+        <input type="hidden" id="form-domain-id" value="" />
+        <div class="form-group">
+          <label for="form-domain-host">域名或主机名 (FQDN)</label>
+          <input type="text" id="form-domain-host" required placeholder="例如: example.com 或 www.example.com" />
+          <small class="form-help">输入根域名会自动勾选域名到期检测（www 域名默认不查询）</small>
+        </div>
+        <div class="form-group" id="form-group-port">
+          <label for="form-domain-port">TLS 端口</label>
+          <input type="text" id="form-domain-port" value="443" placeholder="443" />
+        </div>
+        <div class="form-group form-checkbox">
+          <label class="checkbox-label">
+            <input type="checkbox" id="form-domain-is-pinned" />
+            <span>置顶此监控目标</span>
+          </label>
+          <small class="form-help">置顶后常驻列表顶端。根域名与 www 域名默认勾选置顶，可随时取消。</small>
+        </div>
+        <div class="form-group form-checkbox">
+          <label class="checkbox-label">
+            <input type="checkbox" id="form-domain-notify-disabled" />
+            <span>关闭此目标的告警通知</span>
+          </label>
+          <small class="form-help">开启后此域名进入免打扰模式，证书或域名发生临期、过期或错误时均不发送告警推送。</small>
+        </div>
+        <div class="form-group form-checkbox">
+          <label class="checkbox-label">
+            <input type="checkbox" id="form-domain-check-ssl" checked />
+            <span>检查 SSL 证书</span>
+          </label>
+          <small class="form-help">监控网站或服务的 HTTPS 证书状态。若根域名无业务或无解析，可取消勾选以仅监控域名过期时间。</small>
+        </div>
+        <div class="form-group form-checkbox">
+          <label class="checkbox-label">
+            <input type="checkbox" id="form-domain-check-reg" />
+            <span>检查域名过期</span>
+          </label>
+          <small class="form-help">基于 RDAP 协议查询域名注册到期时间。输入根域名时自动勾选；子域名及 www 域名默认不查询。</small>
+        </div>
+        <div class="form-group form-checkbox" id="form-group-multi-host">
+          <label class="checkbox-label">
+            <input type="checkbox" id="form-domain-multi-host" />
+            <span>启用多主机模式</span>
+          </label>
+          <small class="form-help">针对分区解析 / 独立证书多节点（如境内外不同 CDN、多机房独立部署等场景），系统直连各节点以当前域名 SNI 握手分别检测。</small>
+        </div>
+        <div id="form-domain-multi-host-box" class="form-group hidden">
+          <label class="section-label">多主机探测节点列表</label>
+          <div class="multi-host-input-bar">
+            <select id="node-input-type" class="node-select-type" title="解析类型">
+              <option value="A">A (IPv4)</option>
+              <option value="AAAA">AAAA (IPv6)</option>
+              <option value="CNAME">CNAME (别名)</option>
+            </select>
+            <input type="text" id="node-input-value" class="node-input-val" placeholder="解析值 (如 1.1.1.1 或 cdn.example.com)" />
+            <input type="text" id="node-input-alias" class="node-input-alias" placeholder="备注 (可选)" />
+            <button type="button" id="btn-add-host-node" class="btn btn-secondary btn-sm">
+              <svg class="icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              <span>添加</span>
+            </button>
+          </div>
+          <div id="multi-host-nodes-container" class="multi-host-nodes-list">
+            <!-- 动态渲染的节点行 -->
+          </div>
+          <input type="hidden" id="form-domain-hosts-list" value="" />
+          <small class="form-help">按 类型 + 解析值 逐行添加探测节点，保存后将以当前域名 SNI 分别直连各节点检测证书状态。</small>
+        </div>
+        <div class="modal-footer space-between">
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <button type="button" id="link-switch-to-batch" class="btn btn-secondary">
+              <span>切换为批量导入</span>
+            </button>
+            <button type="button" id="link-switch-to-api-import" class="btn btn-secondary">
+              <span>切换为 API 导入</span>
+            </button>
+          </div>
+          <div class="btn-group">
+            <button type="button" class="btn btn-secondary" data-close-modal="modal-domain">取消</button>
+            <button type="submit" id="btn-save-domain" class="btn btn-primary">保存</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 域名批量导入与数据备份模态框 -->
+  <div id="modal-batch-backup" class="modal-backdrop hidden">
+    <div class="modal-card glass-panel modal-lg">
+      <div class="modal-header">
+        <h2 class="modal-title">导入与备份</h2>
+        <button type="button" class="modal-close-icon" data-close-modal="modal-batch-backup" title="关闭">&times;</button>
+      </div>
+
+      <!-- 选项卡分类 -->
+      <div class="settings-tabs">
+        <button type="button" class="backup-tab active" data-tab="tab-dns-api-import">域名 API</button>
+        <button type="button" class="backup-tab" data-tab="tab-batch-import">文件导入</button>
+        <button type="button" class="backup-tab" data-tab="tab-backup-export">备份</button>
+        <button type="button" class="backup-tab" data-tab="tab-backup-restore">恢复</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- 标签页：DNS API 动态导入 -->
+        <div id="tab-dns-api-import" class="backup-panel active">
+          <div class="dns-api-intro glass-subpanel">
+            <div class="dns-api-intro-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <path d="M2 12h20"></path>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+              </svg>
+            </div>
+            <div class="dns-api-intro-text">
+              <div class="dns-api-intro-title">域名 API 同步</div>
+              <div class="dns-api-intro-desc">
+                支持接入 Cloudflare、阿里云 DNS、腾讯云 / DNSPod、阿里云 ESA、腾讯云 EdgeOne、华为云、AWS Route 53、GoDaddy、DigitalOcean、Vultr 等常见平台，通过 API 自动枚举并导入子域名；可为目标域名定制子域名黑名单，自动过滤并排除不需要监控的子域名。
+              </div>
+            </div>
+          </div>
+
+          <form id="dns-api-sync-form" class="mt-4">
+            <div class="settings-grid">
+              <div class="form-group">
+                <label for="dns-sync-provider-select">选择 DNS 服务商 / 凭据 <span class="text-rose">*</span></label>
+                <select id="dns-sync-provider-select" class="channel-select" required>
+                  <option value="">-- 请选择 DNS 提供商或已保存账号 --</option>
+                  <optgroup id="dns-optgroup-saved" label="已保存的凭据账号">
+                  </optgroup>
+                  <optgroup label="直接临时输入凭据">
+                    <option value="custom_cloudflare">Cloudflare (API Token / Global Key)</option>
+                    <option value="custom_aliyun">阿里云 DNS (Alidns - AK/SK)</option>
+                    <option value="custom_aliyun_esa">阿里云 ESA (边缘安全加速 - AK/SK)</option>
+                    <option value="custom_tencent">腾讯云 DNSPod (API 3.0 - SecretId/Key)</option>
+                    <option value="custom_dnspod_token">DNSPod 经典 Token (ID,Token)</option>
+                    <option value="custom_edgeone">腾讯云 EdgeOne (边缘加速 - SecretId/Key)</option>
+                    <option value="custom_volcengine">火山引擎 DNS (TrafficRoute - AK/SK)</option>
+                    <option value="custom_huawei">华为云 DNS (IAM Token)</option>
+                    <option value="custom_aws_route53">AWS Route 53 (AccessKey / Secret)</option>
+                    <option value="custom_godaddy">GoDaddy (Key / Secret)</option>
+                    <option value="custom_digitalocean">DigitalOcean (Access Token)</option>
+                    <option value="custom_vultr">Vultr (API Key)</option>
+                  </optgroup>
+                </select>
+                <div id="dns-sync-perm-hint" class="dns-perm-alert mt-2 hidden"></div>
+              </div>
+
+              <div class="form-group">
+                <label for="dns-sync-domain">目标主域名 <span class="text-rose">*</span></label>
+                <input type="text" id="dns-sync-domain" required placeholder="如 example.com" />
+                <small class="form-help">将自动拉取该主域名下所有 A、AAAA、CNAME 等 Web 主机记录</small>
+              </div>
+            </div>
+
+            <!-- 动态凭据输入区（当选择直接输入时展示） -->
+            <div id="dns-sync-custom-creds" class="dns-creds-box glass-subpanel hidden mt-2">
+              <div class="settings-grid">
+                <div class="form-group" id="group-dns-key">
+                  <label id="lbl-dns-key" for="dns-sync-auth-key">API Token / Key <span class="text-rose">*</span></label>
+                  <input type="password" id="dns-sync-auth-key" placeholder="请输入 API Token 或 AccessKey ID" autocomplete="off" />
+                </div>
+                <div class="form-group" id="group-dns-secret">
+                  <label id="lbl-dns-secret" for="dns-sync-auth-secret">SecretKey / 邮箱</label>
+                  <input type="password" id="dns-sync-auth-secret" placeholder="请输入 Secret 或邮箱" autocomplete="off" />
+                </div>
+              </div>
+              <div class="settings-grid">
+                <div class="form-group" id="group-dns-zone">
+                  <label id="lbl-dns-zone" for="dns-sync-zone-id">Zone ID / Site ID (可选)</label>
+                  <input type="text" id="dns-sync-zone-id" placeholder="留空则系统自动根据域名查询" />
+                </div>
+                <div class="form-group flex items-center pt-4">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="dns-sync-save-creds" />
+                    <span>同时保存此凭据，方便下次直接选用</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <!-- 子域名黑名单设置（核心特性） -->
+            <div class="form-group mt-3">
+              <div class="flex items-center justify-between mb-1">
+                <label for="dns-sync-blacklist">
+                  子域名黑名单过滤规则
+                  <span class="badge badge-purple ml-2">命中即跳过不导入</span>
+                </label>
+                <span class="text-muted text-xs">每行一条规则，不区分大小写</span>
+              </div>
+              <textarea id="dns-sync-blacklist" rows="3" class="code-area" placeholder="mail
+smtp.example.com
+dev-*
+*.internal
+test"></textarea>
+              <small class="form-help">
+                支持：① 子域名前缀（如输入 <code>mail</code>，将过滤 <code>mail.example.com</code>）；② 完整子域名（如 <code>smtp.example.com</code>）；③ 通配符（如 <code>dev-*</code> 或 <code>*.internal</code>）。
+              </small>
+            </div>
+
+            <div class="settings-grid mt-3">
+              <div class="form-group">
+                <label for="dns-sync-rdap-mode">域名到期检查 (RDAP) 策略</label>
+                <select id="dns-sync-rdap-mode" class="channel-select">
+                  <option value="auto" selected>智能识别：根域名检查，子域名仅监控 SSL</option>
+                  <option value="all">全量开启：所有子域名均开启 RDAP</option>
+                  <option value="domain-only">仅监控域名过期：不检查 SSL 证书</option>
+                  <option value="none">全部关闭：仅监控 SSL 证书</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="dns-sync-default-port">默认探测端口</label>
+                <input type="text" id="dns-sync-default-port" value="443" placeholder="443" />
+              </div>
+            </div>
+
+            <div class="form-group mt-2">
+              <label class="checkbox-label">
+                <input type="checkbox" id="dns-sync-auto-task" />
+                <span>保存为后台自动定时同步任务（定时自动同步最新子域名并过滤黑名单）</span>
+              </label>
+            </div>
+
+            <!-- 操作按钮与预览区 -->
+            <div class="modal-footer mt-4">
+              <div class="btn-group">
+                <button type="button" id="btn-dns-preview" class="btn btn-secondary">
+                  <svg class="icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                  </svg>
+                  <span>预览</span>
+                </button>
+                <button type="button" class="btn btn-secondary" data-close-modal="modal-batch-backup">
+                  <span>取消</span>
+                </button>
+                <button type="button" id="btn-dns-execute-sync" class="btn btn-primary">
+                  <svg class="icon-xs" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                  <span>导入</span>
+                </button>
+              </div>
+            </div>
+          </form>
+
+          <!-- 实时预览区 -->
+          <div id="dns-preview-container" class="dns-preview-card glass-subpanel hidden mt-4">
+            <div class="dns-preview-header">
+              <div class="dns-preview-stats">
+                <span class="badge badge-blue">API 总记录: <strong id="preview-total-count">0</strong></span>
+                <span class="badge badge-emerald">符合待导入: <strong id="preview-allowed-count">0</strong></span>
+                <span class="badge badge-amber">黑名单拦截: <strong id="preview-blocked-count">0</strong></span>
+              </div>
+            </div>
+            
+            <div id="dns-preview-blocked-box" class="dns-preview-section hidden mt-2">
+              <div class="dns-section-title text-amber">以下子域名命中黑名单，将被排除跳过：</div>
+              <div id="dns-preview-blocked-list" class="dns-tags-wrap"></div>
+            </div>
+
+            <div id="dns-preview-allowed-box" class="dns-preview-section mt-2">
+              <div class="dns-section-title text-emerald">即将导入监控的目标域名：</div>
+              <div id="dns-preview-allowed-list" class="dns-tags-wrap"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 标签页 2：批量导入域名 -->
+        <div id="tab-batch-import" class="backup-panel hidden">
+          <!-- DNS 导出文件解析上传区 -->
+          <label for="batch-dns-file" class="dns-upload-box" id="dns-dropzone">
+            <input type="file" id="batch-dns-file" class="dns-file-input" accept=".zone,.txt,.dns,.db,.csv,.tsv,.xlsx,.json" />
+            <div class="dns-upload-content">
+              <div class="dns-upload-icon">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+              </div>
+              <div class="dns-upload-text">
+                <span class="dns-upload-title">上传解析文件</span>
+                <span class="dns-upload-sub">支持 Cloudflare、DNSPod、阿里云、AWS Route 53、华为云等导出的 <code>.zone</code> / <code>.xlsx</code> / <code>.csv</code> / <code>.json</code> / <code>.txt</code></span>
+              </div>
+              <span class="btn btn-secondary btn-sm">选择文件</span>
+            </div>
+            <div id="dns-parse-status" class="dns-parse-status hidden">
+              <span id="dns-status-badge" class="badge badge-blue">解析完成</span>
+              <span id="dns-status-text" class="dns-status-text"></span>
+            </div>
+          </label>
+
+          <div class="divider-text"><span>或手动粘贴域名</span></div>
+
+          <form id="batch-import-form">
+            <div class="form-group">
+              <label for="batch-import-text">域名列表（一行一个）</label>
+              <textarea id="batch-import-text" rows="7" class="code-area" required placeholder="example.com
+www.example.com
+sub.example.com:8443
+https://my-domain.org
+# 支持以 # 开头的注释行
+another-site.net"></textarea>
+              <small class="form-help">支持直接粘贴 URL 或携带端口；自动忽略空白行与 # 注释行，重复域名自动跳过并给出统计。</small>
+            </div>
+
+            <div class="settings-grid">
+              <div class="form-group">
+                <label for="batch-rdap-mode">域名到期检查 (RDAP) 策略</label>
+                <select id="batch-rdap-mode" class="channel-select">
+                  <option value="auto" selected>智能识别：根域名自动开启，子域名（含 www）仅检测 SSL</option>
+                  <option value="all">全量开启：所有导入目标均开启 RDAP 域名到期检查</option>
+                  <option value="domain-only">仅监控域名过期：所有目标均检查域名到期，不检查 SSL 证书</option>
+                  <option value="none">全部关闭：仅检测 SSL 证书状态</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="batch-default-port">默认端口</label>
+                <input type="text" id="batch-default-port" value="443" placeholder="443" />
+              </div>
+            </div>
+
+            <div class="modal-footer space-between mt-3">
+              <button type="button" id="btn-batch-clear" class="btn btn-secondary">
+                <span>清空</span>
+              </button>
+              <div class="btn-group">
+                <button type="button" class="btn btn-secondary" data-close-modal="modal-batch-backup">取消</button>
+                <button type="submit" id="btn-batch-submit" class="btn btn-primary">导入</button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <!-- 标签页 3：备份 -->
+        <div id="tab-backup-export" class="backup-panel hidden">
+          <div class="backup-cards-grid">
+            <div class="backup-card">
+              <div class="backup-card-icon icon-purple">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+              </div>
+              <div class="backup-card-content">
+                <h4 class="backup-card-title">完整备份 (JSON)</h4>
+                <p class="backup-card-desc">导出全部监控目标、巡检阶梯、告警通知渠道（Shoutrrr / Apprise）与安全防护配置，可用于一键灾备恢复或整机实例迁移。</p>
+                <button type="button" id="btn-export-json" class="btn btn-primary btn-sm">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                  </svg>
+                  <span>备份 (JSON)</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="backup-card">
+              <div class="backup-card-icon icon-blue">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                  <line x1="16" y1="13" x2="8" y2="13"></line>
+                  <line x1="16" y1="17" x2="8" y2="17"></line>
+                  <polyline points="10 9 9 9 8 9"></polyline>
+                </svg>
+              </div>
+              <div class="backup-card-content">
+                <h4 class="backup-card-title">纯域名 (TXT)</h4>
+                <p class="backup-card-desc">导出干净的一行一个域名纯文本文件，格式与批量导入完全兼容，便于二次整理或同步至其他监控系统。</p>
+                <button type="button" id="btn-export-txt" class="btn btn-secondary btn-sm">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                  </svg>
+                  <span>导出 (TXT)</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 标签页 4：恢复 -->
+        <div id="tab-backup-restore" class="backup-panel hidden">
+          <form id="backup-restore-form">
+            <div class="form-group">
+              <label for="backup-file-input">选择 Argus 备份文件 (.json)</label>
+              <input type="file" id="backup-file-input" accept=".json,application/json" class="file-input" required />
+              <small class="form-help">请选择此前由 Argus 导出的 JSON 备份文件</small>
+            </div>
+
+            <div class="form-group">
+              <label>恢复选项</label>
+              <div class="form-checkbox">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="restore-chk-domains" checked />
+                  <span>恢复监控域名列表（自动合并，跳过已存在域名）</span>
+                </label>
+              </div>
+              <div class="form-checkbox mt-1">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="restore-chk-settings" checked />
+                  <span>恢复系统设置与通知渠道配置</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="modal-footer space-between mt-3">
+              <div></div>
+              <div class="btn-group">
+                <button type="button" class="btn btn-secondary" data-close-modal="modal-batch-backup">取消</button>
+                <button type="submit" id="btn-restore-submit" class="btn btn-primary">恢复</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 系统与安全设置模态框 -->
+  <div id="modal-settings" class="modal-backdrop hidden">
+    <div class="modal-card glass-panel modal-lg">
+      <div class="modal-header">
+        <h2 class="modal-title">设置</h2>
+        <button type="button" class="modal-close-icon" data-close-modal="modal-settings" title="关闭">&times;</button>
+      </div>
+
+      <!-- 设置分类选项卡 -->
+      <div class="settings-tabs">
+        <button type="button" class="settings-tab active" data-tab="tab-general">常规</button>
+        <button type="button" class="settings-tab" data-tab="tab-policy">策略</button>
+        <button type="button" class="settings-tab" data-tab="tab-notifications">通知</button>
+        <button type="button" class="settings-tab" data-tab="tab-dns-providers-config">凭据</button>
+        <button type="button" class="settings-tab" data-tab="tab-about">关于</button>
+      </div>
+
+      <form id="settings-form" class="modal-body">
+        <!-- 标签页 1：常规设置 (配色、备案与安全) -->
+        <div id="tab-general" class="settings-panel active">
+          <!-- 默认配色 -->
+          <div class="security-card">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">默认配色</h3>
+                <p class="security-desc">设置系统默认的显示配色外观，支持跟随系统、暗色模式与浅色模式。</p>
+              </div>
+            </div>
+            <div class="form-group" style="max-width: 320px;">
+              <select id="cfg-default-theme" class="channel-select">
+                <option value="auto">跟随系统 (System Auto)</option>
+                <option value="dark">深色模式 (Dark Mode)</option>
+                <option value="light">浅色模式 (Light Mode)</option>
+              </select>
+            </div>
+          </div>
+
+          <hr class="modal-divider" />
+
+          <!-- 站点备案设置卡片 -->
+          <div class="security-card">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">备案信息</h3>
+                <p class="security-desc">配置站点的 ICP 备案与公安公网安备号，将在未登录状态（登录页与初始化页）的底部显示。</p>
+              </div>
+            </div>
+            <div class="settings-grid">
+              <div class="form-group">
+                <label for="cfg-icp">ICP 备案号</label>
+                <input type="text" id="cfg-icp" placeholder="例如: 浙ICP备2023000000号-1" />
+                <small class="form-help">未登录访问时自动链接至工信部备案系统 (beian.miit.gov.cn)</small>
+              </div>
+              <div class="form-group">
+                <label for="cfg-mps">MPS 公网安备号</label>
+                <input type="text" id="cfg-mps" placeholder="例如: 浙公网安备 33010602000000号" />
+                <small class="form-help">未登录访问时自动链接至全国公安机关互联网站安全管理服务平台</small>
+              </div>
+            </div>
+          </div>
+
+          <hr class="modal-divider" />
+
+          <!-- 修改密码 -->
+          <div class="security-card">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">修改密码</h3>
+                <p class="security-desc">修改当前管理员账户的登录密码。</p>
+              </div>
+              <button type="button" id="btn-password-modal" class="btn btn-secondary btn-sm">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                <span>修改密码</span>
+              </button>
+            </div>
+          </div>
+
+          <hr class="modal-divider" />
+
+          <!-- Passkey 管理 -->
+          <div class="security-card">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">Passkey</h3>
+                <p class="security-desc">支持 Bitwarden 密码管理器插件、Touch ID、Windows Hello、YubiKey 等硬件与生物识别凭据。</p>
+              </div>
+              <button type="button" id="btn-add-passkey" class="btn btn-secondary btn-sm">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 5v14M5 12h14"></path>
+                </svg>
+                <span>添加 Passkey</span>
+              </button>
+            </div>
+            <div id="passkey-list" class="passkey-list">
+              <div class="passkey-empty">暂未绑定 Passkey 凭证</div>
+            </div>
+          </div>
+
+          <hr class="modal-divider" />
+
+          <!-- 2FA (TOTP) 管理 -->
+          <div class="security-card">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">两步验证 2FA </h3>
+                <p class="security-desc">使用 Bitwarden、1Password 或 Google Authenticator 动态 6 位口令保护登录。</p>
+              </div>
+              <div id="totp-action-box">
+                <button type="button" id="btn-enable-2fa-modal" class="btn btn-secondary btn-sm">配置 2FA</button>
+              </div>
+            </div>
+          </div>
+
+          <hr class="modal-divider" />
+
+          <!-- Cloudflare Turnstile -->
+          <div class="security-card">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">Cloudflare Turnstile</h3>
+                <p class="security-desc">在后台登录页启用智能人机安全验证。通过验证后若密码输错，不会重复触发验证。</p>
+              </div>
+              <div class="form-checkbox">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="cfg-turnstile-enabled" />
+                  <span>启用 Turnstile</span>
+                </label>
+              </div>
+            </div>
+            <div id="turnstile-settings-fields" class="settings-grid hidden">
+              <div class="form-group">
+                <label for="cfg-turnstile-sitekey">Site Key (公钥)</label>
+                <input type="text" id="cfg-turnstile-sitekey" placeholder="0x4AAAAAA..." />
+              </div>
+              <div class="form-group">
+                <label for="cfg-turnstile-secret">Secret Key (私钥)</label>
+                <input type="password" id="cfg-turnstile-secret" placeholder="0x4AAAAAA..." />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 标签页 2：巡检与告警阶梯 -->
+        <div id="tab-policy" class="settings-panel hidden">
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="cfg-interval">巡检执行周期</label>
+              <input type="text" id="cfg-interval" required placeholder="例如: 12h, 6h, 1h, 24h" />
+              <small class="form-help">例如: 1h、6h、12h、24h</small>
+            </div>
+            <div class="form-group">
+              <label for="cfg-thresholds">告警天数阶梯</label>
+              <input type="text" id="cfg-thresholds" required value="30,15,7,3" placeholder="30,15,7,3" />
+              <small class="form-help">&lt;7 天橙色警告，&lt;3 天红色警告</small>
+            </div>
+            <div class="form-group">
+              <label for="cfg-timeout">单次网络超时时间</label>
+              <input type="text" id="cfg-timeout" required placeholder="10s" />
+              <small class="form-help">例如: 5s, 10s</small>
+            </div>
+          </div>
+        </div>
+
+        <!-- 标签页 2：通知服务渠道（下拉式按需添加配置） -->
+        <div id="tab-notifications" class="settings-panel hidden">
+          <!-- 已配置的通知渠道卡片列表 -->
+          <div class="form-group">
+            <div class="label-with-badge">
+              <label>已启用的通知渠道</label>
+              <a href="https://containrrr.dev/shoutrrr/services/overview/" target="_blank" rel="noopener noreferrer" class="link-external">
+                官方支持服务及 URL 格式文档 ↗
+              </a>
+            </div>
+            <div id="configured-channels-list" class="channels-grid">
+              <div class="channel-empty-tip">暂未配置任何通知渠道，请在下方选择渠道添加。</div>
+            </div>
+          </div>
+
+          <!-- 添加新通知渠道交互卡片 -->
+          <div class="channel-builder-card">
+            <h4 class="channel-builder-title">添加新通知渠道</h4>
+            <div class="channel-builder-row">
+              <div class="form-group flex-1">
+                <label for="select-channel-type">选择通知类型</label>
+                <select id="select-channel-type" class="channel-select">
+                  <option value="telegram">Telegram 机器人 (Bot Token + Chat ID)</option>
+                  <option value="bark">Bark (iOS 即时推送)</option>
+                  <option value="discord">Discord Webhook</option>
+                  <option value="slack">Slack Webhook</option>
+                  <option value="smtp">邮件 (SMTP)</option>
+                  <option value="ntfy">Ntfy 订阅主题</option>
+                  <option value="gotify">Gotify</option>
+                  <option value="webhook">通用 Webhook (HTTP POST)</option>
+                  <option value="custom">高级 Shoutrrr URL</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- 动态渠道表单字段 -->
+            <div id="channel-fields-container" class="channel-fields-box">
+              <!-- Telegram -->
+              <div id="fields-telegram" class="channel-field-group">
+                <div class="settings-grid">
+                  <div class="form-group">
+                    <label for="ch-tg-token">Bot Token</label>
+                    <input type="text" id="ch-tg-token" placeholder="例如: 123456:ABC-DEF1234ghIkl..." />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-tg-chatid">Chat ID / 频道 ID</label>
+                    <input type="text" id="ch-tg-chatid" placeholder="例如: -1001234567890" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Bark -->
+              <div id="fields-bark" class="channel-field-group hidden">
+                <div class="settings-grid">
+                  <div class="form-group">
+                    <label for="ch-bark-key">Device Key (设备密钥)</label>
+                    <input type="text" id="ch-bark-key" placeholder="在 Bark App 中获取的 Device Key" />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-bark-host">服务器域名 (可选，默认 api.day.app)</label>
+                    <input type="text" id="ch-bark-host" placeholder="api.day.app" value="api.day.app" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Discord -->
+              <div id="fields-discord" class="channel-field-group hidden">
+                <div class="form-group">
+                  <label for="ch-discord-url">Discord Webhook 完整地址</label>
+                  <input type="text" id="ch-discord-url" placeholder="https://discord.com/api/webhooks/..." />
+                  <small class="form-help">直接粘贴 Discord 频道的 Webhook 地址，系统会自动转换</small>
+                </div>
+              </div>
+
+              <!-- Slack -->
+              <div id="fields-slack" class="channel-field-group hidden">
+                <div class="form-group">
+                  <label for="ch-slack-url">Slack Webhook 完整地址</label>
+                  <input type="text" id="ch-slack-url" placeholder="https://hooks.slack.com/services/..." />
+                </div>
+              </div>
+
+              <!-- SMTP 邮件 -->
+              <div id="fields-smtp" class="channel-field-group hidden">
+                <div class="settings-grid">
+                  <div class="form-group">
+                    <label for="ch-smtp-host">SMTP 服务器</label>
+                    <input type="text" id="ch-smtp-host" placeholder="例如: smtp.example.com" />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-smtp-port">端口</label>
+                    <input type="text" id="ch-smtp-port" placeholder="587" value="587" />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-smtp-user">用户名 / 邮箱</label>
+                    <input type="text" id="ch-smtp-user" placeholder="user@example.com" />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-smtp-pass">密码 / 授权码</label>
+                    <input type="password" id="ch-smtp-pass" placeholder="••••••••" />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-smtp-from">发件人 (From)</label>
+                    <input type="text" id="ch-smtp-from" placeholder="alert@example.com" />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-smtp-to">收件人 (To)</label>
+                    <input type="text" id="ch-smtp-to" placeholder="admin@example.com" />
+                  </div>
+                  <div class="form-group" style="grid-column: 1 / -1;">
+                    <label for="ch-smtp-subject">邮件主题 (可选)</label>
+                    <input type="text" id="ch-smtp-subject" placeholder="留空则自动使用通知标题，例如: [Argus 监控告警]" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Ntfy -->
+              <div id="fields-ntfy" class="channel-field-group hidden">
+                <div class="settings-grid">
+                  <div class="form-group">
+                    <label for="ch-ntfy-topic">订阅 Topic 主题名</label>
+                    <input type="text" id="ch-ntfy-topic" placeholder="例如: my_ssl_alerts" />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-ntfy-host">服务器域名 (可选，默认 ntfy.sh)</label>
+                    <input type="text" id="ch-ntfy-host" placeholder="ntfy.sh" value="ntfy.sh" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Gotify -->
+              <div id="fields-gotify" class="channel-field-group hidden">
+                <div class="settings-grid">
+                  <div class="form-group">
+                    <label for="ch-gotify-host">Gotify 服务器地址 (支持带端口，例如 gotify.example.com 或 192.168.1.100:8080)</label>
+                    <input type="text" id="ch-gotify-host" placeholder="例如: gotify.example.com" />
+                  </div>
+                  <div class="form-group">
+                    <label for="ch-gotify-token">App Token</label>
+                    <input type="text" id="ch-gotify-token" placeholder="App Token (例如 gtfya.xxxxxxxx)" />
+                  </div>
+                  <div class="form-group" style="grid-column: 1 / -1;">
+                    <label class="checkbox-label" style="margin-top: 0.25rem;">
+                      <input type="checkbox" id="ch-gotify-tls" checked />
+                      <span>使用 HTTPS 安全连接 (若为本地局域网纯 HTTP 部署，请取消勾选)</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Webhook -->
+              <div id="fields-webhook" class="channel-field-group hidden">
+                <div class="form-group">
+                  <label for="ch-webhook-url">Webhook URL (HTTP POST)</label>
+                  <input type="text" id="ch-webhook-url" placeholder="https://example.com/api/webhook" />
+                </div>
+              </div>
+
+              <!-- Custom URL -->
+              <div id="fields-custom" class="channel-field-group hidden">
+                <div class="form-group">
+                  <label for="ch-custom-url">Shoutrrr 格式完整 URL</label>
+                  <input type="text" id="ch-custom-url" placeholder="service://..." />
+                </div>
+              </div>
+            </div>
+
+            <div class="channel-action-row mt-2">
+              <button type="button" id="btn-add-channel" class="btn btn-secondary btn-sm">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 5v14M5 12h14"></path>
+                </svg>
+                <span id="btn-add-channel-text">添加到通知列表</span>
+              </button>
+              <button type="button" id="btn-cancel-edit-channel" class="btn btn-ghost btn-sm hidden">
+                <span>取消修改</span>
+              </button>
+            </div>
+          </div>
+
+          <hr class="modal-divider" />
+
+          <!-- Apprise 配置区（依据 compose.yml 是否启动动态置灰） -->
+          <div id="apprise-wrapper" class="form-group">
+            <div class="label-with-badge">
+              <label>Apprise 扩展通知网关</label>
+              <span id="apprise-status-badge" class="badge badge-purple">支持 100+ 渠道 · 飞书/钉钉/企微</span>
+            </div>
+
+            <!-- compose.yml 未启用时的置灰提示 -->
+            <div id="apprise-unavailable-banner" class="alert-box alert-warning hidden">
+              <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              </svg>
+              <span>compose.yml 中未启用 Apprise 服务。如需启用飞书、钉钉、企微等扩展通知，请在 compose.yml 中取消 apprise 注释并重启容器。</span>
+            </div>
+
+            <div class="form-checkbox">
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfg-apprise-enabled" />
+                <span>启用 Apprise 转发网关</span>
+              </label>
+            </div>
+
+            <div id="apprise-details" class="settings-subgroup hidden">
+              <div class="form-group">
+                <label for="cfg-apprise-api">Apprise API 地址</label>
+                <input type="text" id="cfg-apprise-api" placeholder="http://apprise:8000/notify" />
+              </div>
+              <div class="form-group">
+                <label for="cfg-apprise-urls">Apprise 渠道 URLs (每行一条)</label>
+                <textarea id="cfg-apprise-urls" rows="3" class="code-area" placeholder="lark://token
+dingtalk://token
+wecombot://bot_key"></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+
+
+
+        <!-- 标签页 4：域名凭据与黑名单 -->
+        <div id="tab-dns-providers-config" class="settings-panel hidden">
+          <div class="dns-mgmt-grid">
+            <!-- 凭据账号管理 -->
+            <div class="dns-mgmt-box glass-subpanel">
+              <div class="dns-mgmt-header">
+                <h3 class="text-sm font-semibold">API 凭据</h3>
+                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                  <button type="button" id="btn-switch-to-api-import-settings" class="btn btn-secondary btn-sm">切换为 API 导入</button>
+                  <button type="button" id="btn-add-dns-provider" class="btn btn-secondary btn-sm">+ 新增</button>
+                </div>
+              </div>
+              <div id="dns-providers-list" class="dns-cards-list">
+                <div class="text-muted text-xs p-3 text-center">正在加载已保存的凭据...</div>
+              </div>
+            </div>
+
+            <!-- 主域名同步规则与黑名单列表 -->
+            <div class="dns-mgmt-box glass-subpanel mt-3">
+              <div class="dns-mgmt-header">
+                <div>
+                  <h3 class="text-sm font-semibold">同步规则与黑名单</h3>
+                  <div class="text-xs text-muted">管理域名的自动同步状态与过滤黑名单</div>
+                </div>
+              </div>
+              <div id="dns-sync-configs-list" class="dns-cards-list">
+                <div class="text-muted text-xs p-3 text-center">暂未配置任何同步规则</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 标签页 5：关于 -->
+        <div id="tab-about" class="settings-panel hidden">
+          <!-- 关于 Argus 卡片 -->
+          <div class="security-card">
+            <div class="about-hero">
+              <div class="about-brand">
+                <div class="logo-badge about-logo-badge">
+                  <svg class="icon-brand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <circle cx="12" cy="12" r="6"></circle>
+                    <circle cx="12" cy="12" r="2"></circle>
+                  </svg>
+                </div>
+                <div class="about-info">
+                  <div class="about-title-row">
+                    <h3 class="about-app-name">Argus</h3>
+                    <span class="about-version-badge">v1.0.0</span>
+                  </div>
+                  <p class="about-app-desc">极简轻量级 SSL 证书与域名监控守护系统</p>
+                </div>
+              </div>
+              <div class="about-actions">
+                <a href="https://github.com/eallion/argus" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm" title="在 GitHub 查看源码与最新 Release">
+                  <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+                  </svg>
+                  <span>GitHub</span>
+                </a>
+              </div>
+            </div>
+
+            <div class="about-meta-grid">
+              <div class="about-meta-item">
+                <span class="about-meta-label">开源协议</span>
+                <span class="about-meta-value">MIT License</span>
+              </div>
+              <div class="about-meta-item">
+                <span class="about-meta-label">作者</span>
+                <span class="about-meta-value"><a href="https://github.com/eallion" target="_blank" rel="noopener noreferrer" class="link-hover">eallion</a></span>
+              </div>
+              <div class="about-meta-item">
+                <span class="about-meta-label">后端技术</span>
+                <span class="about-meta-value">Go (Golang)</span>
+              </div>
+              <div class="about-meta-item">
+                <span class="about-meta-label">前端架构</span>
+                <span class="about-meta-value">Vanilla Web (零重型依赖)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer space-between">
+          <button type="button" id="btn-test-notification" class="btn btn-secondary hidden">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+            <span>发送测试通知</span>
+          </button>
+          <div class="btn-group">
+            <button type="button" class="btn btn-secondary" data-close-modal="modal-settings">取消</button>
+            <button type="submit" id="btn-save-settings" class="btn btn-primary">保存设置</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 2FA 绑定模态框 -->
+  <div id="modal-totp-setup" class="modal-backdrop hidden">
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <h2 class="modal-title">两步验证</h2>
+        <button type="button" class="modal-close-icon" data-close-modal="modal-totp-setup" title="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="form-help">请在 Bitwarden、1Password 或手机身份验证器中手动添加以下密钥：</p>
+        <div class="totp-secret-box">
+          <code id="totp-secret-text" class="totp-secret">JBSWY3DPEHPK3PXP</code>
+          <button type="button" id="btn-copy-secret" class="btn btn-secondary btn-sm">复制</button>
+        </div>
+        <form id="totp-verify-form">
+          <div class="form-group">
+            <label for="totp-verify-code">请输入 App 生成的 6 位验证码以确认激活</label>
+            <input type="text" id="totp-verify-code" required maxlength="6" pattern="[0-9]{6}" inputmode="numeric" placeholder="123456" />
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close-modal="modal-totp-setup">取消</button>
+            <button type="submit" class="btn btn-primary">立即启用 2FA</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修改密码模态框 -->
+  <div id="modal-password" class="modal-backdrop hidden">
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <h2 class="modal-title">修改管理员密码</h2>
+        <button type="button" class="modal-close-icon" data-close-modal="modal-password" title="关闭">&times;</button>
+      </div>
+      <form id="password-form" class="modal-body">
+        <div class="form-group">
+          <label for="pwd-old">当前旧密码</label>
+          <input type="password" id="pwd-old" required placeholder="请输入旧密码" />
+        </div>
+        <div class="form-group">
+          <label for="pwd-new">新密码</label>
+          <input type="password" id="pwd-new" required minlength="6" placeholder="至少 6 位新密码" />
+        </div>
+        <div class="form-group">
+          <label for="pwd-confirm">确认新密码</label>
+          <input type="password" id="pwd-confirm" required minlength="6" placeholder="再次输入新密码" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-close-modal="modal-password">取消</button>
+          <button type="submit" id="btn-save-password" class="btn btn-primary">确认修改</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- DNS 凭据账号管理模态框 -->
+  <div id="modal-dns-provider-edit" class="modal-backdrop hidden">
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <h2 id="modal-dns-provider-title" class="modal-title">DNS 凭据</h2>
+        <button type="button" class="modal-close-icon" data-close-modal="modal-dns-provider-edit" title="关闭">&times;</button>
+      </div>
+      <form id="dns-provider-form" class="modal-body">
+        <input type="hidden" id="form-dns-provider-id" value="" />
+        <div class="form-group">
+          <label for="form-dns-provider-name">凭据备注名称 <span class="text-rose">*</span></label>
+          <input type="text" id="form-dns-provider-name" required placeholder="如：我的生产环境 Cloudflare 账号" />
+        </div>
+        <div class="form-group">
+          <label for="form-dns-provider-type">DNS 服务商类型 <span class="text-rose">*</span></label>
+          <select id="form-dns-provider-type" class="channel-select" required>
+            <option value="cloudflare">Cloudflare (API Token / Global Key)</option>
+            <option value="aliyun">阿里云 DNS (Alidns - AK/SK)</option>
+            <option value="aliyun_esa">阿里云 ESA (边缘安全加速 - AK/SK)</option>
+            <option value="tencent">腾讯云 DNSPod (API 3.0 - SecretId/Key)</option>
+            <option value="dnspod_token">DNSPod 经典 Token (ID,Token)</option>
+            <option value="edgeone">腾讯云 EdgeOne (边缘加速 - SecretId/Key)</option>
+            <option value="volcengine">火山引擎 DNS (TrafficRoute - AK/SK)</option>
+            <option value="huawei">华为云 DNS (IAM Token)</option>
+            <option value="aws_route53">AWS Route 53 (AccessKey / Secret)</option>
+            <option value="godaddy">GoDaddy (Key / Secret)</option>
+            <option value="digitalocean">DigitalOcean (Access Token)</option>
+            <option value="vultr">Vultr (API Key)</option>
+          </select>
+          <div id="form-dns-perm-hint" class="dns-perm-alert mt-2 hidden"></div>
+        </div>
+        <div class="form-group">
+          <label id="form-lbl-dns-key" for="form-dns-auth-key">API Token / AccessKey ID <span class="text-rose">*</span></label>
+          <input type="password" id="form-dns-auth-key" required placeholder="请输入密钥或 Token" autocomplete="off" />
+        </div>
+        <div class="form-group" id="form-group-dns-secret">
+          <label id="form-lbl-dns-secret" for="form-dns-auth-secret">AccessKey Secret / 邮箱 (可选)</label>
+          <input type="password" id="form-dns-auth-secret" placeholder="请输入 Secret 或邮箱" autocomplete="off" />
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-close-modal="modal-dns-provider-edit">取消</button>
+          <button type="submit" class="btn btn-primary">保存凭据</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 主域名 API 规则与凭据编辑模态框 -->
+  <div id="modal-domain-api-edit" class="modal-backdrop hidden">
+    <div class="modal-card glass-panel" style="max-width: 620px;">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <h2 id="modal-domain-api-title" class="modal-title">编辑主域名 API 与凭据</h2>
+        </div>
+        <button type="button" class="modal-close-icon" data-close-modal="modal-domain-api-edit" title="关闭">&times;</button>
+      </div>
+      <form id="form-domain-api-edit" class="modal-body">
+        <input type="hidden" id="edit-api-config-id" value="" />
+        <div class="settings-grid">
+          <div class="form-group">
+            <label for="edit-api-domain">目标主域名</label>
+            <input type="text" id="edit-api-domain" readonly style="opacity: 0.85; font-family: var(--font-mono); font-weight: 600; cursor: not-allowed;" />
+          </div>
+          <div class="form-group">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.35rem;">
+              <label for="edit-api-provider-select" style="margin-bottom: 0;">关联 API 凭据 <span class="text-rose">*</span></label>
+              <button type="button" id="btn-quick-edit-credential" class="btn-link-action" style="font-size: 0.75rem; color: var(--color-blue); background: none; border: none; cursor: pointer; text-decoration: underline; white-space: nowrap !important;">修改当前密钥</button>
+            </div>
+            <select id="edit-api-provider-select" class="channel-select" required></select>
+          </div>
+        </div>
+
+        <div class="settings-grid mt-2">
+          <div class="form-group">
+            <label for="edit-api-zone-id">Zone ID / 区域代码 (可选)</label>
+            <input type="text" id="edit-api-zone-id" placeholder="留空则自动按主域名匹配" />
+          </div>
+          <div class="form-group">
+            <label for="edit-api-default-port">默认探测端口</label>
+            <input type="text" id="edit-api-default-port" value="443" placeholder="443" />
+          </div>
+        </div>
+
+        <div class="form-group mt-2">
+          <label for="edit-api-blacklist">子域名黑名单过滤规则 (每行一条或以逗号分隔)</label>
+          <textarea id="edit-api-blacklist" rows="3" class="code-area" placeholder="dev.example.com&#10;internal.*&#10;test" style="font-family: var(--font-mono); font-size: 0.8125rem;"></textarea>
+          <small class="form-help">匹配黑名单规则的子域名不会被导入监控。</small>
+        </div>
+
+        <div class="form-group mt-2">
+          <label class="checkbox-label">
+            <input type="checkbox" id="edit-api-auto-sync" />
+            <span>开启后台定时自动拉取最新解析记录并过滤同步</span>
+          </label>
+        </div>
+
+        <div class="form-group mt-1">
+          <label class="checkbox-label">
+            <input type="checkbox" id="edit-api-check-domain" />
+            <span>导入的子域名同步检查域名过期 (RDAP)</span>
+          </label>
+        </div>
+
+        <div class="form-group mt-2" style="background: rgba(244, 63, 94, 0.06); padding: 0.65rem 0.85rem; border-radius: var(--radius-sm); border: 1px dashed rgba(244, 63, 94, 0.3);">
+          <label class="checkbox-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+            <input type="checkbox" id="edit-api-disabled" />
+            <span style="font-weight: 500; color: var(--color-rose);">禁用 API 模式（停用 API 自动同步并恢复普通按钮样式，仅监控手动添加的子域名）</span>
+          </label>
+        </div>
+
+        <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.25rem;">
+          <button type="button" id="btn-delete-domain-api" class="btn btn-secondary text-rose" title="解绑后此主域名将变为普通监控目标">解绑 API</button>
+          <div style="display: flex; gap: 0.5rem;">
+            <button type="button" class="btn btn-secondary" data-close-modal="modal-domain-api-edit">取消</button>
+            <button type="button" id="btn-save-and-sync-domain-api" class="btn btn-secondary">保存并立即同步</button>
+            <button type="submit" class="btn btn-primary">保存配置</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 全局通用危险/二次确认与交互提示模态框 (替代原生浏览器 alert/confirm/prompt) -->
+  <div id="modal-confirm" class="modal-backdrop hidden" style="z-index: 1050;">
+    <div class="modal-card glass-panel" style="max-width: 440px;">
+      <div class="modal-header">
+        <h2 id="modal-confirm-title" class="modal-title">操作确认</h2>
+        <button type="button" class="modal-close-icon" data-close-modal="modal-confirm" title="关闭">&times;</button>
+      </div>
+      <div class="modal-body" style="padding: 1.25rem 1.5rem 0.5rem;">
+        <div style="display: flex; gap: 1rem; align-items: flex-start;">
+          <div id="modal-confirm-icon-box" style="flex-shrink: 0; width: 40px; height: 40px; border-radius: 50%; background: rgba(244, 63, 94, 0.12); color: var(--color-rose); display: flex; align-items: center; justify-content: center;">
+            <svg id="modal-confirm-icon" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 22px; height: 22px;">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+          </div>
+          <div style="flex: 1;">
+            <p id="modal-confirm-message" style="margin: 0; font-size: 0.9375rem; line-height: 1.5; color: var(--text-main); word-break: break-word;"></p>
+            <div id="modal-confirm-input-wrap" class="hidden" style="margin-top: 0.85rem;">
+              <input type="password" id="modal-confirm-input" class="form-input" style="width: 100%; box-sizing: border-box;" autocomplete="current-password" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 0.65rem; margin-top: 1.25rem; padding: 0.75rem 1.5rem 1.25rem;">
+        <button type="button" id="modal-confirm-btn-cancel" class="btn btn-secondary" data-close-modal="modal-confirm">取消</button>
+        <button type="button" id="modal-confirm-btn-ok" class="btn btn-danger">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局悬浮 Tooltip 容器 (鼠标 Hover 触发) -->
+  <div id="global-tooltip" class="global-tooltip" role="tooltip" aria-hidden="true">
+    <div id="global-tooltip-text"></div>
+    <div class="global-tooltip-arrow"></div>
+  </div>
+
+  <script src="/app.js?v=1.0.30"></script>
+</body>
+</html>

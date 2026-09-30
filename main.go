@@ -26,10 +26,15 @@ import (
 //go:embed web/*
 var embeddedWebFS embed.FS
 
+// Version 由编译时 -ldflags "-X main.Version=..." 动态注入，默认为 dev
+var Version = "dev"
+
 func main() {
 	portFlag := flag.String("port", "42905", "Web server listening port")
 	dbFlag := flag.String("db", "data/argus.db", "Path to SQLite database file")
 	flag.Parse()
+
+	log.Printf("[Argus] Starting Argus %s", Version)
 
 	port := *portFlag
 	if envPort := os.Getenv("PORT"); envPort != "" {
@@ -79,6 +84,208 @@ func main() {
 				URLs:    appriseURLs,
 			},
 		})
+	}
+
+	// Alert aggregator for batch notifications
+	alertAggregator := notifier.NewAlertAggregator()
+
+	// Flush aggregated alerts helper
+	flushAggregated := func() (int, error) {
+		items := alertAggregator.Flush()
+		if len(items) == 0 {
+			return 0, nil
+		}
+		intervalStr := database.GetSetting("notification_batch_interval", "1h")
+		title, body, severity := notifier.FormatSummary(items, intervalStr)
+		n := getNotifier()
+		if n == nil {
+			return len(items), fmt.Errorf("通知组件未初始化")
+		}
+		// 记录一条合并汇总到系统消息中心
+		_, _ = database.AddNotification(title, body, severity, "合并通知汇总")
+		log.Printf("[Argus] Flushing %d aggregated alerts: %s", len(items), title)
+		return len(items), n.Send(title, body)
+	}
+
+	getAggregatedCount := func() int {
+		return alertAggregator.Count()
+	}
+
+	// 统一告警信息解析辅助函数
+	extractTargetAlert := func(updated *db.Domain) (worstLevel string, messages []string) {
+		levelWeight := map[string]int{
+			"expired":  100,
+			"critical": 90,
+			"warning":  80,
+			"error":    70,
+			"notice":   60,
+			"info":     50,
+			"healthy":  10,
+		}
+		currentWeight := 0
+
+		updateLevel := func(lvl string) {
+			w := levelWeight[lvl]
+			if w > currentWeight {
+				currentWeight = w
+				if lvl == "expired" || lvl == "critical" || lvl == "error" {
+					worstLevel = "critical"
+				} else {
+					worstLevel = lvl
+				}
+			}
+		}
+
+		if updated.CheckSSL {
+			if updated.MultiHost && updated.SSLDetails != "" {
+				var nodes []checker.NodeResult
+				_ = json.Unmarshal([]byte(updated.SSLDetails), &nodes)
+				for _, n := range nodes {
+					if n.Status != "healthy" {
+						updateLevel(n.Status)
+						label := n.Node
+						if n.Alias != "" {
+							label = fmt.Sprintf("%s (%s)", n.Node, n.Alias)
+						}
+						expStr := ""
+						if n.ExpiresAt != nil {
+							expStr = n.ExpiresAt.Format("2006-01-02")
+						}
+						if n.Status == "error" {
+							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 检测失败: %s", label, n.Error))
+						} else if n.Status == "expired" {
+							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 严重过期: 证书已失效！", label))
+						} else if n.Status == "critical" {
+							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 红色紧急告警: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
+								label, n.DaysLeft, expStr, n.Issuer))
+						} else if n.Status == "warning" {
+							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 橙色警告: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
+								label, n.DaysLeft, expStr, n.Issuer))
+						} else if n.Status == "notice" {
+							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 15天临期提醒: 剩余 %d 天 (到期: %s, 颁发者: %s)",
+								label, n.DaysLeft, expStr, n.Issuer))
+						} else if n.Status == "info" {
+							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 30天到期提醒: 剩余 %d 天 (到期: %s, 颁发者: %s)",
+								label, n.DaysLeft, expStr, n.Issuer))
+						}
+					}
+				}
+			} else {
+				if updated.SSLStatus != "healthy" && updated.SSLStatus != "skipped" {
+					updateLevel(updated.SSLStatus)
+					if updated.SSLStatus == "error" {
+						messages = append(messages, fmt.Sprintf("- SSL 证书 [检测失败]: %s", updated.SSLError))
+					} else if updated.SSLStatus == "expired" {
+						messages = append(messages, "- SSL 证书 [严重过期]: 证书已失效！")
+					} else if updated.SSLStatus == "critical" {
+						expStr := ""
+						if updated.SSLExpiresAt != nil {
+							expStr = updated.SSLExpiresAt.Format("2006-01-02")
+						}
+						messages = append(messages, fmt.Sprintf("- SSL 证书 [红色紧急告警]: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
+							updated.SSLDaysLeft, expStr, updated.SSLIssuer))
+					} else if updated.SSLStatus == "warning" {
+						expStr := ""
+						if updated.SSLExpiresAt != nil {
+							expStr = updated.SSLExpiresAt.Format("2006-01-02")
+						}
+						messages = append(messages, fmt.Sprintf("- SSL 证书 [橙色警告]: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
+							updated.SSLDaysLeft, expStr, updated.SSLIssuer))
+					} else if updated.SSLStatus == "notice" {
+						expStr := ""
+						if updated.SSLExpiresAt != nil {
+							expStr = updated.SSLExpiresAt.Format("2006-01-02")
+						}
+						messages = append(messages, fmt.Sprintf("- SSL 证书 [15天临期提醒]: 剩余 %d 天 (到期: %s, 颁发者: %s)",
+							updated.SSLDaysLeft, expStr, updated.SSLIssuer))
+					} else if updated.SSLStatus == "info" {
+						expStr := ""
+						if updated.SSLExpiresAt != nil {
+							expStr = updated.SSLExpiresAt.Format("2006-01-02")
+						}
+						messages = append(messages, fmt.Sprintf("- SSL 证书 [30天到期提醒]: 剩余 %d 天 (到期: %s, 颁发者: %s)",
+							updated.SSLDaysLeft, expStr, updated.SSLIssuer))
+					}
+				}
+			}
+		}
+
+		if updated.CheckDomain {
+			if updated.DomainStatus != "healthy" && updated.DomainStatus != "skipped" {
+				updateLevel(updated.DomainStatus)
+				if updated.DomainStatus == "error" {
+					messages = append(messages, fmt.Sprintf("- 域名注册 [RDAP查询失败]: %s", updated.DomainError))
+				} else if updated.DomainStatus == "expired" {
+					messages = append(messages, "- 域名注册 [已超过注册期]: 域名已过期！")
+				} else if updated.DomainStatus == "critical" {
+					expStr := ""
+					if updated.DomainExpiresAt != nil {
+						expStr = updated.DomainExpiresAt.Format("2006-01-02")
+					}
+					messages = append(messages, fmt.Sprintf("- 域名注册 [红色紧急告警]: 仅剩 %d 天 (到期: %s)",
+						updated.DomainDaysLeft, expStr))
+				} else if updated.DomainStatus == "warning" {
+					expStr := ""
+					if updated.DomainExpiresAt != nil {
+						expStr = updated.DomainExpiresAt.Format("2006-01-02")
+					}
+					messages = append(messages, fmt.Sprintf("- 域名注册 [橙色警告]: 仅剩 %d 天 (到期: %s)",
+						updated.DomainDaysLeft, expStr))
+				} else if updated.DomainStatus == "notice" {
+					expStr := ""
+					if updated.DomainExpiresAt != nil {
+						expStr = updated.DomainExpiresAt.Format("2006-01-02")
+					}
+					messages = append(messages, fmt.Sprintf("- 域名注册 [15天临期提醒]: 剩余 %d 天 (到期: %s)",
+						updated.DomainDaysLeft, expStr))
+				} else if updated.DomainStatus == "info" {
+					expStr := ""
+					if updated.DomainExpiresAt != nil {
+						expStr = updated.DomainExpiresAt.Format("2006-01-02")
+					}
+					messages = append(messages, fmt.Sprintf("- 域名注册 [30天到期提醒]: 剩余 %d 天 (到期: %s)",
+						updated.DomainDaysLeft, expStr))
+				}
+			}
+		}
+
+		if worstLevel == "" {
+			worstLevel = "info"
+		}
+		return worstLevel, messages
+	}
+
+	// 统一告警分发函数：记录内部历史通知，并根据实时/合并模式推送外部渠道
+	dispatchTargetAlert := func(updated *db.Domain, level string, messages []string) {
+		if len(messages) == 0 {
+			return
+		}
+		title := fmt.Sprintf("[Argus 告警] 监控目标 %s 状态异常", updated.Host)
+		content := fmt.Sprintf("目标: %s\n%s", updated.Host, strings.Join(messages, "\n"))
+
+		// 1. 系统内部消息系统：登录后可查看历史通知，始终记录
+		_, _ = database.AddNotification(title, content, level, updated.Host)
+
+		// 2. 外部通知推送
+		if updated.NotifyDisabled {
+			log.Printf("[Argus] 目标 %s 发生异常但已设置关闭通知，已静音外部推送", updated.Host)
+			return
+		}
+
+		mode := database.GetSetting("notification_mode", "realtime")
+		if mode == "batch" {
+			alertAggregator.Add(updated.Host, messages, level)
+			log.Printf("[Argus] 目标 %s 异常已加入合并通知队列 (待发送队列: %d 项)", updated.Host, alertAggregator.Count())
+		} else {
+			n := getNotifier()
+			if n != nil {
+				if err := n.Send(title, content); err != nil {
+					log.Printf("[Argus] 实时通知发送失败 (%s): %v", updated.Host, err)
+				} else {
+					log.Printf("[Argus] 目标 %s 实时告警已发送", updated.Host)
+				}
+			}
+		}
 	}
 
 	// Single domain check logic with 30/15/7/3 tier support
@@ -290,8 +497,6 @@ func main() {
 
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, 10)
-		var alertBlocks []string
-		var alertMu sync.Mutex
 
 		// 目标列表随机乱序，打乱连续的主域名聚集
 		shuffledDomains := make([]db.Domain, len(domains))
@@ -317,141 +522,15 @@ func main() {
 					return
 				}
 
-				// Check tier alerts
-				var messages []string
-				if updated.CheckSSL {
-					if updated.MultiHost && updated.SSLDetails != "" {
-						var nodes []checker.NodeResult
-						_ = json.Unmarshal([]byte(updated.SSLDetails), &nodes)
-						for _, n := range nodes {
-							if n.Status != "healthy" {
-								label := n.Node
-								if n.Alias != "" {
-									label = fmt.Sprintf("%s (%s)", n.Node, n.Alias)
-								}
-								expStr := ""
-								if n.ExpiresAt != nil {
-									expStr = n.ExpiresAt.Format("2006-01-02")
-								}
-								if n.Status == "error" {
-									messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 检测失败: %s", label, n.Error))
-								} else if n.Status == "expired" {
-									messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 严重过期: 证书已失效！", label))
-								} else if n.Status == "critical" {
-									messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 红色紧急告警: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
-										label, n.DaysLeft, expStr, n.Issuer))
-								} else if n.Status == "warning" {
-									messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 橙色警告: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
-										label, n.DaysLeft, expStr, n.Issuer))
-								} else if n.Status == "notice" {
-									messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 15天临期提醒: 剩余 %d 天 (到期: %s, 颁发者: %s)",
-										label, n.DaysLeft, expStr, n.Issuer))
-								} else if n.Status == "info" {
-									messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 30天到期提醒: 剩余 %d 天 (到期: %s, 颁发者: %s)",
-										label, n.DaysLeft, expStr, n.Issuer))
-								}
-							}
-						}
-					} else {
-						if updated.SSLStatus == "error" {
-							messages = append(messages, fmt.Sprintf("- SSL 证书 [检测失败]: %s", updated.SSLError))
-						} else if updated.SSLStatus == "expired" {
-							messages = append(messages, "- SSL 证书 [严重过期]: 证书已失效！")
-						} else if updated.SSLStatus == "critical" {
-							expStr := ""
-							if updated.SSLExpiresAt != nil {
-								expStr = updated.SSLExpiresAt.Format("2006-01-02")
-							}
-							messages = append(messages, fmt.Sprintf("- SSL 证书 [红色紧急告警]: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
-								updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-						} else if updated.SSLStatus == "warning" {
-							expStr := ""
-							if updated.SSLExpiresAt != nil {
-								expStr = updated.SSLExpiresAt.Format("2006-01-02")
-							}
-							messages = append(messages, fmt.Sprintf("- SSL 证书 [橙色警告]: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
-								updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-						} else if updated.SSLStatus == "notice" {
-							expStr := ""
-							if updated.SSLExpiresAt != nil {
-								expStr = updated.SSLExpiresAt.Format("2006-01-02")
-							}
-							messages = append(messages, fmt.Sprintf("- SSL 证书 [15天临期提醒]: 剩余 %d 天 (到期: %s, 颁发者: %s)",
-								updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-						} else if updated.SSLStatus == "info" {
-							expStr := ""
-							if updated.SSLExpiresAt != nil {
-								expStr = updated.SSLExpiresAt.Format("2006-01-02")
-							}
-							messages = append(messages, fmt.Sprintf("- SSL 证书 [30天到期提醒]: 剩余 %d 天 (到期: %s, 颁发者: %s)",
-								updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-						}
-					}
-				}
-
-				if updated.CheckDomain {
-					if updated.DomainStatus == "error" {
-						messages = append(messages, fmt.Sprintf("- 域名注册 [RDAP查询失败]: %s", updated.DomainError))
-					} else if updated.DomainStatus == "expired" {
-						messages = append(messages, "- 域名注册 [已超过注册期]: 域名已过期！")
-					} else if updated.DomainStatus == "critical" {
-						expStr := ""
-						if updated.DomainExpiresAt != nil {
-							expStr = updated.DomainExpiresAt.Format("2006-01-02")
-						}
-						messages = append(messages, fmt.Sprintf("- 域名注册 [红色紧急告警]: 仅剩 %d 天 (到期: %s)",
-							updated.DomainDaysLeft, expStr))
-					} else if updated.DomainStatus == "warning" {
-						expStr := ""
-						if updated.DomainExpiresAt != nil {
-							expStr = updated.DomainExpiresAt.Format("2006-01-02")
-						}
-						messages = append(messages, fmt.Sprintf("- 域名注册 [橙色警告]: 仅剩 %d 天 (到期: %s)",
-							updated.DomainDaysLeft, expStr))
-					} else if updated.DomainStatus == "notice" {
-						expStr := ""
-						if updated.DomainExpiresAt != nil {
-							expStr = updated.DomainExpiresAt.Format("2006-01-02")
-						}
-						messages = append(messages, fmt.Sprintf("- 域名注册 [15天临期提醒]: 剩余 %d 天 (到期: %s)",
-							updated.DomainDaysLeft, expStr))
-					} else if updated.DomainStatus == "info" {
-						expStr := ""
-						if updated.DomainExpiresAt != nil {
-							expStr = updated.DomainExpiresAt.Format("2006-01-02")
-						}
-						messages = append(messages, fmt.Sprintf("- 域名注册 [30天到期提醒]: 剩余 %d 天 (到期: %s)",
-							updated.DomainDaysLeft, expStr))
-					}
-				}
-
+				level, messages := extractTargetAlert(updated)
 				if len(messages) > 0 {
-					if !updated.NotifyDisabled {
-						alertMu.Lock()
-						alertBlocks = append(alertBlocks, fmt.Sprintf("目标: %s\n%s", d.Host, strings.Join(messages, "\n")))
-						alertMu.Unlock()
-					} else {
-						log.Printf("[Argus] 目标 %s 发生异常但已设置关闭通知，已静音跳过推送", d.Host)
-					}
+					dispatchTargetAlert(updated, level, messages)
 				}
 			}(item)
 		}
 
 		wg.Wait()
-
-		if len(alertBlocks) > 0 {
-			title := fmt.Sprintf("[Argus 告警] 发现 %d 项域名/证书异常", len(alertBlocks))
-			body := strings.Join(alertBlocks, "\n\n")
-			log.Printf("[Argus] %s. Broadcasting notifications...", title)
-			n := getNotifier()
-			if err := n.Send(title, body); err != nil {
-				log.Printf("[Argus] Alert notification error: %v", err)
-			} else {
-				log.Printf("[Argus] Alert notifications sent successfully.")
-			}
-		} else {
-			log.Printf("[Argus] Check completed. All monitored targets are healthy.")
-		}
+		log.Printf("[Argus] Check completed across %d targets.", len(domains))
 	}
 
 	// Static assets from embed
@@ -461,7 +540,7 @@ func main() {
 	}
 
 	// Initialize HTTP Server
-	srv := server.NewServer(database, getNotifier, runAllChecks, checkSingleDomain, assetsFS)
+	srv := server.NewServer(database, Version, getNotifier, runAllChecks, checkSingleDomain, assetsFS, flushAggregated, getAggregatedCount)
 	httpServer := &http.Server{
 		Addr:         ":" + port,
 		Handler:      srv.Handler(),
@@ -474,6 +553,37 @@ func main() {
 		log.Printf("[Argus] Web dashboard listening on http://0.0.0.0:%s", port)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[Argus] HTTP server failed: %v", err)
+		}
+	}()
+
+	// Background batch notification flush scheduler
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		lastFlushTime := time.Now()
+
+		for range ticker.C {
+			mode := database.GetSetting("notification_mode", "realtime")
+			if mode != "batch" {
+				continue
+			}
+			intervalStr := database.GetSetting("notification_batch_interval", "1h")
+			interval, err := time.ParseDuration(intervalStr)
+			if err != nil || interval < 1*time.Minute {
+				interval = 1 * time.Hour
+			}
+
+			if time.Since(lastFlushTime) >= interval {
+				lastFlushTime = time.Now()
+				if alertAggregator.Count() > 0 {
+					count, err := flushAggregated()
+					if err != nil {
+						log.Printf("[Argus] 定期合并通知推送失败 (%d 项): %v", count, err)
+					} else {
+						log.Printf("[Argus] 定期合并通知已推送，共汇总 %d 项告警", count)
+					}
+				}
+			}
 		}
 	}()
 
@@ -495,108 +605,9 @@ func main() {
 			return
 		}
 
-		var messages []string
-		if updated.CheckSSL {
-			if updated.MultiHost && updated.SSLDetails != "" {
-				var nodes []checker.NodeResult
-				_ = json.Unmarshal([]byte(updated.SSLDetails), &nodes)
-				for _, n := range nodes {
-					if n.Status != "healthy" {
-						label := n.Node
-						if n.Alias != "" {
-							label = fmt.Sprintf("%s (%s)", n.Node, n.Alias)
-						}
-						expStr := ""
-						if n.ExpiresAt != nil {
-							expStr = n.ExpiresAt.Format("2006-01-02")
-						}
-						if n.Status == "error" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 检测失败: %s", label, n.Error))
-						} else if n.Status == "expired" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 严重过期: 证书已失效！", label))
-						} else if n.Status == "critical" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 红色紧急告警: 仅剩 %d 天 (到期: %s, 颁发者: %s)", label, n.DaysLeft, expStr, n.Issuer))
-						} else if n.Status == "warning" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 橙色警告: 仅剩 %d 天 (到期: %s, 颁发者: %s)", label, n.DaysLeft, expStr, n.Issuer))
-						} else if n.Status == "notice" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 15天临期提醒: 剩余 %d 天 (到期: %s, 颁发者: %s)", label, n.DaysLeft, expStr, n.Issuer))
-						} else if n.Status == "info" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 30天到期提醒: 剩余 %d 天 (到期: %s, 颁发者: %s)", label, n.DaysLeft, expStr, n.Issuer))
-						}
-					}
-				}
-			} else {
-				if updated.SSLStatus == "error" {
-					messages = append(messages, fmt.Sprintf("- SSL 证书 [检测失败]: %s", updated.SSLError))
-				} else if updated.SSLStatus == "expired" {
-					messages = append(messages, "- SSL 证书 [严重过期]: 证书已失效！")
-				} else if updated.SSLStatus == "critical" {
-					expStr := ""
-					if updated.SSLExpiresAt != nil {
-						expStr = updated.SSLExpiresAt.Format("2006-01-02")
-					}
-					messages = append(messages, fmt.Sprintf("- SSL 证书 [红色紧急告警]: 仅剩 %d 天 (到期: %s, 颁发者: %s)", updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-				} else if updated.SSLStatus == "warning" {
-					expStr := ""
-					if updated.SSLExpiresAt != nil {
-						expStr = updated.SSLExpiresAt.Format("2006-01-02")
-					}
-					messages = append(messages, fmt.Sprintf("- SSL 证书 [橙色警告]: 仅剩 %d 天 (到期: %s, 颁发者: %s)", updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-				} else if updated.SSLStatus == "notice" {
-					expStr := ""
-					if updated.SSLExpiresAt != nil {
-						expStr = updated.SSLExpiresAt.Format("2006-01-02")
-					}
-					messages = append(messages, fmt.Sprintf("- SSL 证书 [15天临期提醒]: 剩余 %d 天 (到期: %s, 颁发者: %s)", updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-				} else if updated.SSLStatus == "info" {
-					expStr := ""
-					if updated.SSLExpiresAt != nil {
-						expStr = updated.SSLExpiresAt.Format("2006-01-02")
-					}
-					messages = append(messages, fmt.Sprintf("- SSL 证书 [30天到期提醒]: 剩余 %d 天 (到期: %s, 颁发者: %s)", updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-				}
-			}
-		}
-
-		if updated.CheckDomain {
-			if updated.DomainStatus == "error" {
-				messages = append(messages, fmt.Sprintf("- 域名注册 [RDAP查询失败]: %s", updated.DomainError))
-			} else if updated.DomainStatus == "expired" {
-				messages = append(messages, "- 域名注册 [已超过注册期]: 域名已过期！")
-			} else if updated.DomainStatus == "critical" {
-				expStr := ""
-				if updated.DomainExpiresAt != nil {
-					expStr = updated.DomainExpiresAt.Format("2006-01-02")
-				}
-				messages = append(messages, fmt.Sprintf("- 域名注册 [红色紧急告警]: 仅剩 %d 天 (到期: %s)", updated.DomainDaysLeft, expStr))
-			} else if updated.DomainStatus == "warning" {
-				expStr := ""
-				if updated.DomainExpiresAt != nil {
-					expStr = updated.DomainExpiresAt.Format("2006-01-02")
-				}
-				messages = append(messages, fmt.Sprintf("- 域名注册 [橙色警告]: 仅剩 %d 天 (到期: %s)", updated.DomainDaysLeft, expStr))
-			} else if updated.DomainStatus == "notice" {
-				expStr := ""
-				if updated.DomainExpiresAt != nil {
-					expStr = updated.DomainExpiresAt.Format("2006-01-02")
-				}
-				messages = append(messages, fmt.Sprintf("- 域名注册 [15天临期提醒]: 剩余 %d 天 (到期: %s)", updated.DomainDaysLeft, expStr))
-			} else if updated.DomainStatus == "info" {
-				expStr := ""
-				if updated.DomainExpiresAt != nil {
-					expStr = updated.DomainExpiresAt.Format("2006-01-02")
-				}
-				messages = append(messages, fmt.Sprintf("- 域名注册 [30天到期提醒]: 剩余 %d 天 (到期: %s)", updated.DomainDaysLeft, expStr))
-			}
-		}
-
-		if len(messages) > 0 && !updated.NotifyDisabled {
-			n := getNotifier()
-			if n != nil {
-				title := fmt.Sprintf("[Argus 告警] 监控目标 %s 状态异常", updated.Host)
-				content := fmt.Sprintf("目标: %s\n%s", updated.Host, strings.Join(messages, "\n"))
-				_ = n.Send(title, content)
-			}
+		level, messages := extractTargetAlert(updated)
+		if len(messages) > 0 {
+			dispatchTargetAlert(updated, level, messages)
 		}
 	}
 

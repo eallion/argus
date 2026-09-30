@@ -216,6 +216,16 @@ func (d *DB) migrate() error {
 		updated_at DATETIME NOT NULL,
 		FOREIGN KEY (provider_id) REFERENCES dns_providers(id) ON DELETE CASCADE
 	);
+
+	CREATE TABLE IF NOT EXISTS notifications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL,
+		content TEXT NOT NULL,
+		level TEXT NOT NULL DEFAULT 'warning',
+		target_host TEXT NOT NULL DEFAULT '',
+		is_read INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL
+	);
 	`
 	if _, err := d.db.Exec(schema); err != nil {
 		return err
@@ -232,6 +242,8 @@ func (d *DB) migrate() error {
 	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN notify_disabled INTEGER NOT NULL DEFAULT 0")
 	_, _ = d.db.Exec("ALTER TABLE dns_sync_configs ADD COLUMN is_disabled INTEGER NOT NULL DEFAULT 0")
 	_, _ = d.db.Exec("CREATE INDEX IF NOT EXISTS idx_dns_sync_configs_domain ON dns_sync_configs(domain)")
+	_, _ = d.db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC)")
+	_, _ = d.db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications(is_read)")
 
 	return nil
 }
@@ -657,9 +669,11 @@ func (d *DB) EnsureDefaultSettings() {
 		"apprise_enabled":      "false",
 		"apprise_api_url":      "http://apprise:8000/notify",
 		"apprise_urls":         "[]",
-		"turnstile_enabled":    "false",
-		"turnstile_site_key":   "",
-		"turnstile_secret_key": "",
+		"turnstile_enabled":            "false",
+		"turnstile_site_key":           "",
+		"turnstile_secret_key":         "",
+		"notification_mode":           "realtime",
+		"notification_batch_interval": "1h",
 	}
 	for k, v := range defaults {
 		var exists int
@@ -1030,4 +1044,114 @@ func (d *DB) UpdateDNSSyncResult(id int64, status string, syncTime time.Time) er
 		status, syncTime, time.Now().UTC(), id)
 	return err
 }
+
+// In-app Notifications operations
+
+type NotificationRecord struct {
+	ID         int64     `json:"id"`
+	Title      string    `json:"title"`
+	Content    string    `json:"content"`
+	Level      string    `json:"level"` // "critical", "warning", "notice", "info", "success"
+	TargetHost string    `json:"target_host"`
+	IsRead     bool      `json:"is_read"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func (d *DB) AddNotification(title, content, level, targetHost string) (*NotificationRecord, error) {
+	now := time.Now().UTC()
+	if level == "" {
+		level = "warning"
+	}
+	res, err := d.db.Exec(`
+		INSERT INTO notifications (title, content, level, target_host, is_read, created_at)
+		VALUES (?, ?, ?, ?, 0, ?)
+	`, title, content, level, targetHost, now)
+	if err != nil {
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return &NotificationRecord{
+		ID:         id,
+		Title:      title,
+		Content:    content,
+		Level:      level,
+		TargetHost: targetHost,
+		IsRead:     false,
+		CreatedAt:  now,
+	}, nil
+}
+
+func (d *DB) GetNotifications(limit, offset int, unreadOnly bool) ([]NotificationRecord, int, int, error) {
+	var totalCount int
+	var unreadCount int
+	_ = d.db.QueryRow("SELECT COUNT(*) FROM notifications").Scan(&totalCount)
+	_ = d.db.QueryRow("SELECT COUNT(*) FROM notifications WHERE is_read = 0").Scan(&unreadCount)
+
+	query := "SELECT id, title, content, level, target_host, is_read, created_at FROM notifications"
+	var args []interface{}
+	if unreadOnly {
+		query += " WHERE is_read = 0"
+	}
+	query += " ORDER BY created_at DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+		if offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, offset)
+		}
+	}
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer rows.Close()
+
+	var list []NotificationRecord
+	for rows.Next() {
+		var n NotificationRecord
+		var isReadInt int
+		if err := rows.Scan(&n.ID, &n.Title, &n.Content, &n.Level, &n.TargetHost, &isReadInt, &n.CreatedAt); err != nil {
+			return nil, 0, 0, err
+		}
+		n.IsRead = (isReadInt == 1)
+		list = append(list, n)
+	}
+	return list, totalCount, unreadCount, rows.Err()
+}
+
+func (d *DB) MarkNotificationRead(id int64) error {
+	_, err := d.db.Exec("UPDATE notifications SET is_read = 1 WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) MarkAllNotificationsRead() error {
+	_, err := d.db.Exec("UPDATE notifications SET is_read = 1 WHERE is_read = 0")
+	return err
+}
+
+func (d *DB) DeleteNotification(id int64) error {
+	_, err := d.db.Exec("DELETE FROM notifications WHERE id = ?", id)
+	return err
+}
+
+func (d *DB) ClearNotifications(readOnly bool) error {
+	if readOnly {
+		_, err := d.db.Exec("DELETE FROM notifications WHERE is_read = 1")
+		return err
+	}
+	_, err := d.db.Exec("DELETE FROM notifications")
+	return err
+}
+
+func (d *DB) GetUnreadNotificationCount() (int, error) {
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM notifications WHERE is_read = 0").Scan(&count)
+	return count, err
+}
+
 

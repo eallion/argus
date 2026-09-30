@@ -3,6 +3,7 @@ FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG APP_VERSION=dev
 
 WORKDIR /src
 
@@ -13,13 +14,15 @@ RUN apk add --no-cache git ca-certificates tzdata
 COPY go.mod go.sum ./
 RUN go mod download
 
-# 复制源码并进行跨架构静态编译 (禁用 CGO，剥离调试符号)
+# 复制源码并进行跨架构静态编译 (禁用 CGO，剥离调试符号，注入构建版本号)
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o argus .
+    go build -trimpath -ldflags="-s -w -X 'main.Version=${APP_VERSION}'" -o argus .
 
 # 运行阶段：轻量化 Alpine 镜像
 FROM alpine:3.24
+
+ARG APP_VERSION=dev
 
 WORKDIR /app
 
@@ -29,9 +32,12 @@ RUN apk add --no-cache ca-certificates tzdata && mkdir -p /app/data
 # 从构建阶段复制可执行文件
 COPY --from=builder /src/argus /app/argus
 
-# 默认环境配置
+# 默认环境配置与版本信息
 ENV PORT=42905
 ENV DB_PATH=/app/data/argus.db
+ENV APP_VERSION=${APP_VERSION}
+
+LABEL org.opencontainers.image.version="${APP_VERSION}"
 
 # 数据持久化目录声明
 VOLUME ["/app/data"]

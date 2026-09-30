@@ -30,6 +30,9 @@ const state = {
   dnsProvidersMeta: [],
   savedDNSProviders: [],
   dnsSyncConfigs: [],
+  notifications: [],
+  unreadNotificationsCount: 0,
+  pendingAggregatedCount: 0,
 };
 
 // DOM Elements
@@ -63,6 +66,23 @@ const elements = {
   btnCheckAll: document.getElementById('btn-check-all'),
   btnAddModal: document.getElementById('btn-add-modal'),
   btnBatchModal: document.getElementById('btn-batch-modal'),
+  btnNotificationsCenter: document.getElementById('btn-notifications-center'),
+  modalNotificationsCenter: document.getElementById('modal-notifications-center'),
+  notificationUnreadBadge: document.getElementById('notification-unread-badge'),
+  centerUnreadPill: document.getElementById('center-unread-pill'),
+  btnRefreshNotifications: document.getElementById('btn-refresh-notifications'),
+  chkUnreadOnly: document.getElementById('chk-unread-only'),
+  btnMarkAllRead: document.getElementById('btn-mark-all-read'),
+  btnClearNotifications: document.getElementById('btn-clear-notifications'),
+  notificationListContainer: document.getElementById('notification-list-container'),
+  notificationEmptyState: document.getElementById('notification-empty-state'),
+  settingNotificationMode: document.getElementById('setting-notification-mode'),
+  settingNotificationBatchInterval: document.getElementById('setting-notification-batch-interval'),
+  batchIntervalGroup: document.getElementById('batch-interval-group'),
+  batchActionsBar: document.getElementById('batch-actions-bar'),
+  btnFlushBatch: document.getElementById('btn-flush-batch'),
+  batchPendingPill: document.getElementById('batch-pending-pill'),
+  batchPendingCount: document.getElementById('batch-pending-count'),
   // DNS API Sync Elements
   dnsSyncForm: document.getElementById('dns-api-sync-form'),
   dnsProviderSelect: document.getElementById('dns-sync-provider-select'),
@@ -965,7 +985,7 @@ elements.passwordForm.addEventListener('submit', async (e) => {
 
 // Load Dashboard Data
 async function loadDashboardData() {
-  await Promise.all([loadDomains(), loadSettings(), loadPasskeys(), loadDNSData()]);
+  await Promise.all([loadDomains(), loadSettings(), loadPasskeys(), loadDNSData(), fetchUnreadNotificationCount()]);
 }
 
 // Load Domains
@@ -1016,6 +1036,10 @@ async function loadSettings() {
     state.settings = settings;
     if (settings.icp !== undefined) state.icp = settings.icp;
     if (settings.mps !== undefined) state.mps = settings.mps;
+    const verBadge = document.getElementById('about-app-version');
+    if (verBadge && settings.version) {
+      verBadge.textContent = settings.version.startsWith('v') ? settings.version : `v${settings.version}`;
+    }
     renderAuthFooter();
     updatePolicyKPI();
     renderAppriseStatus();
@@ -3505,6 +3529,22 @@ elements.btnSettingsModal.addEventListener('click', () => {
     document.getElementById('cfg-default-theme').value = localStorage.getItem('argus_theme') || state.settings.default_theme || 'auto';
   }
 
+  // 回填通知发送策略
+  const notifMode = state.settings.notification_mode || 'realtime';
+  if (elements.settingNotificationMode) {
+    elements.settingNotificationMode.value = notifMode;
+  }
+  if (elements.settingNotificationBatchInterval) {
+    elements.settingNotificationBatchInterval.value = state.settings.notification_batch_interval || '1h';
+  }
+  if (elements.batchIntervalGroup) {
+    elements.batchIntervalGroup.classList.toggle('hidden', notifMode !== 'batch');
+  }
+  if (elements.batchActionsBar) {
+    elements.batchActionsBar.classList.toggle('hidden', notifMode !== 'batch');
+  }
+  updatePendingBatchBadge(state.settings.pending_aggregated || 0);
+
   renderAppriseStatus();
   renderSecuritySettings();
   loadDNSData();
@@ -3534,11 +3574,16 @@ elements.settingsForm.addEventListener('submit', async (e) => {
   const mps = document.getElementById('cfg-mps') ? document.getElementById('cfg-mps').value.trim() : '';
   const default_theme = document.getElementById('cfg-default-theme') ? document.getElementById('cfg-default-theme').value : 'auto';
 
+  const notification_mode = elements.settingNotificationMode ? elements.settingNotificationMode.value : 'realtime';
+  const notification_batch_interval = elements.settingNotificationBatchInterval ? elements.settingNotificationBatchInterval.value : '1h';
+
   const payload = {
     interval,
     threshold_days: 15,
     alert_thresholds,
     timeout,
+    notification_mode,
+    notification_batch_interval,
     shoutrrr_urls: shoutrrrRaw,
     apprise_enabled,
     apprise_api_url,
@@ -4642,8 +4687,281 @@ function initThemeManager() {
   }
 }
 
+// ==========================================
+// 系统消息中心与通知策略交互
+// ==========================================
+function updateUnreadBadges(unreadCount, pendingAggregated) {
+  if (unreadCount !== undefined) {
+    state.unreadNotificationsCount = unreadCount || 0;
+  }
+  if (pendingAggregated !== undefined) {
+    state.pendingAggregatedCount = pendingAggregated;
+  }
+
+  const bellBadge = elements.notificationUnreadBadge;
+  if (bellBadge) {
+    if (state.unreadNotificationsCount > 0) {
+      bellBadge.textContent = state.unreadNotificationsCount > 99 ? '99+' : state.unreadNotificationsCount;
+      bellBadge.classList.remove('hidden');
+    } else {
+      bellBadge.classList.add('hidden');
+    }
+  }
+
+  const centerPill = elements.centerUnreadPill;
+  if (centerPill) {
+    if (state.unreadNotificationsCount > 0) {
+      centerPill.textContent = `${state.unreadNotificationsCount} 条未读`;
+      centerPill.classList.remove('hidden');
+    } else {
+      centerPill.classList.add('hidden');
+    }
+  }
+
+  updatePendingBatchBadge(state.pendingAggregatedCount);
+}
+
+function updatePendingBatchBadge(count) {
+  const pill = elements.batchPendingPill;
+  const cnt = elements.batchPendingCount;
+  if (pill && cnt) {
+    cnt.textContent = count || 0;
+    pill.classList.toggle('hidden', !count || count <= 0);
+  }
+}
+
+async function fetchUnreadNotificationCount() {
+  if (!state.isAuthenticated) return;
+  try {
+    const data = await api('/api/notifications/unread-count');
+    updateUnreadBadges(data.unread_count, data.pending_aggregated);
+  } catch (e) {
+    // 静默忽略
+  }
+}
+
+async function loadNotifications() {
+  const listContainer = elements.notificationListContainer;
+  const emptyState = elements.notificationEmptyState;
+  if (!listContainer) return;
+
+  const unreadOnly = elements.chkUnreadOnly?.checked ? 'true' : 'false';
+
+  listContainer.innerHTML = '<div class="text-xs text-muted" style="text-align: center; padding: 2rem;">加载通知记录中...</div>';
+  if (emptyState) emptyState.classList.add('hidden');
+
+  try {
+    const data = await api(`/api/notifications?limit=100&offset=0&unread_only=${unreadOnly}`);
+    state.notifications = data.list || [];
+    updateUnreadBadges(data.unread_count);
+    renderNotificationList();
+  } catch (err) {
+    listContainer.innerHTML = `<div class="text-xs text-rose" style="text-align: center; padding: 2rem;">加载失败: ${escapeHtml(err.message || '未知错误')}</div>`;
+  }
+}
+
+function renderNotificationList() {
+  const listContainer = elements.notificationListContainer;
+  const emptyState = elements.notificationEmptyState;
+  if (!listContainer) return;
+
+  if (!state.notifications || state.notifications.length === 0) {
+    listContainer.innerHTML = '';
+    if (emptyState) emptyState.classList.remove('hidden');
+    return;
+  }
+
+  if (emptyState) emptyState.classList.add('hidden');
+
+  listContainer.innerHTML = state.notifications.map((item) => {
+    const isUnread = !item.is_read;
+    const level = item.level || 'info';
+    let levelBadge = '';
+    if (level === 'critical') {
+      levelBadge = '<span class="badge badge-rose">紧急告警</span>';
+    } else if (level === 'warning') {
+      levelBadge = '<span class="badge badge-amber">警告</span>';
+    } else if (level === 'notice') {
+      levelBadge = '<span class="badge badge-yellow">注意</span>';
+    } else {
+      levelBadge = '<span class="badge badge-blue">信息</span>';
+    }
+
+    const typeBadge = item.type === 'test' 
+      ? '<span class="badge badge-subtle">测试消息</span>' 
+      : (item.type === 'summary' ? '<span class="badge badge-purple">合并汇总</span>' : '');
+
+    const targetBadge = item.target 
+      ? `<span class="notification-target-badge">${escapeHtml(item.target)}</span>` 
+      : '';
+
+    const formattedTime = item.created_at ? new Date(item.created_at).toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }) : '';
+
+    return `
+      <div class="notification-item level-${level} ${isUnread ? 'unread' : ''}" data-id="${item.id}">
+        <div class="notification-item-header">
+          <div class="notification-title-wrap">
+            ${isUnread ? '<span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--color-blue);"></span>' : ''}
+            <span class="notification-item-title">${escapeHtml(item.title)}</span>
+            ${levelBadge}
+            ${typeBadge}
+            ${targetBadge}
+          </div>
+          <span class="notification-time">${escapeHtml(formattedTime)}</span>
+        </div>
+        <div class="notification-item-body">${escapeHtml(item.content)}</div>
+        <div class="notification-item-actions">
+          ${isUnread ? `<button type="button" class="btn btn-ghost btn-sm btn-mark-one-read" data-id="${item.id}" style="font-size:0.75rem;">标为已读</button>` : ''}
+          <button type="button" class="btn btn-ghost btn-sm text-rose btn-delete-notification" data-id="${item.id}" style="font-size:0.75rem;">删除</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // 标为已读
+  listContainer.querySelectorAll('.btn-mark-one-read').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = parseInt(btn.dataset.id, 10);
+      try {
+        await api('/api/notifications/read', {
+          method: 'POST',
+          body: JSON.stringify({ id }),
+        });
+        await fetchUnreadNotificationCount();
+        await loadNotifications();
+      } catch (err) {
+        // Handled in api()
+      }
+    });
+  });
+
+  // 删除单条
+  listContainer.querySelectorAll('.btn-delete-notification').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = parseInt(btn.dataset.id, 10);
+      try {
+        await api(`/api/notifications/${id}`, { method: 'DELETE' });
+        showToast('已删除该条通知', 'success');
+        await fetchUnreadNotificationCount();
+        await loadNotifications();
+      } catch (err) {
+        // Handled in api()
+      }
+    });
+  });
+}
+
+function initNotificationCenter() {
+  // 顶栏铃铛点击打开消息中心模态框
+  if (elements.btnNotificationsCenter) {
+    elements.btnNotificationsCenter.addEventListener('click', () => {
+      openModal('modal-notifications-center');
+      loadNotifications();
+    });
+  }
+
+  // 刷新按钮
+  if (elements.btnRefreshNotifications) {
+    elements.btnRefreshNotifications.addEventListener('click', () => {
+      loadNotifications();
+    });
+  }
+
+  // 仅看未读过滤
+  if (elements.chkUnreadOnly) {
+    elements.chkUnreadOnly.addEventListener('change', () => {
+      loadNotifications();
+    });
+  }
+
+  // 全部已读
+  if (elements.btnMarkAllRead) {
+    elements.btnMarkAllRead.addEventListener('click', async () => {
+      try {
+        await api('/api/notifications/read', {
+          method: 'POST',
+          body: JSON.stringify({ all: true }),
+        });
+        showToast('已全部标记为已读', 'success');
+        await fetchUnreadNotificationCount();
+        await loadNotifications();
+      } catch (err) {
+        // Handled in api()
+      }
+    });
+  }
+
+  // 清空历史
+  if (elements.btnClearNotifications) {
+    elements.btnClearNotifications.addEventListener('click', async () => {
+      const confirmed = await showConfirm('确定要清空系统内所有历史通知记录吗？此操作不可撤销。', {
+        title: '清空历史通知',
+        okText: '确认清空',
+        cancelText: '取消',
+        isDanger: true,
+      });
+      if (!confirmed) return;
+
+      try {
+        await api('/api/notifications', { method: 'DELETE' });
+        showToast('历史通知记录已全部清空', 'success');
+        await fetchUnreadNotificationCount();
+        await loadNotifications();
+      } catch (err) {
+        // Handled in api()
+      }
+    });
+  }
+
+  // 设置面板通知策略联动
+  if (elements.settingNotificationMode) {
+    elements.settingNotificationMode.addEventListener('change', (e) => {
+      const isBatch = e.target.value === 'batch';
+      if (elements.batchIntervalGroup) elements.batchIntervalGroup.classList.toggle('hidden', !isBatch);
+      if (elements.batchActionsBar) elements.batchActionsBar.classList.toggle('hidden', !isBatch);
+    });
+  }
+
+  // 立即发送待合并通知
+  if (elements.btnFlushBatch) {
+    elements.btnFlushBatch.addEventListener('click', async () => {
+      elements.btnFlushBatch.disabled = true;
+      try {
+        const res = await api('/api/notifications/flush-batch', { method: 'POST' });
+        showToast(res.message || '已成功合并推送通知', 'success');
+        await fetchUnreadNotificationCount();
+        if (elements.modalNotificationsCenter && !elements.modalNotificationsCenter.classList.contains('hidden')) {
+          await loadNotifications();
+        }
+      } catch (err) {
+        // Handled in api()
+      } finally {
+        elements.btnFlushBatch.disabled = false;
+      }
+    });
+  }
+
+  // 定时轻量轮询未读数与待发合并数 (每 30 秒)
+  setInterval(() => {
+    if (state.isAuthenticated) {
+      fetchUnreadNotificationCount();
+    }
+  }, 30000);
+}
+
 // Start Application
 initGlobalTooltip();
 initBrandLogo();
 initThemeManager();
+initNotificationCenter();
 checkAuth();

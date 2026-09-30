@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=1.0.26" />
+  <link rel="stylesheet" href="/style.css?v=1.0.31" />
   <script>
     (function() {
       try {
@@ -183,6 +183,13 @@
             <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
             <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
           </svg>
+        </button>
+        <button id="btn-notifications-center" class="btn btn-ghost btn-icon btn-notification-bell" title="系统消息中心">
+          <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+          </svg>
+          <span id="notification-unread-badge" class="notification-badge hidden">0</span>
         </button>
         <button id="btn-settings-modal" class="btn btn-ghost btn-icon" title="系统设置与安全">
           <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -956,6 +963,53 @@ another-site.net"></textarea>
 
         <!-- 标签页 2：通知服务渠道（下拉式按需添加配置） -->
         <div id="tab-notifications" class="settings-panel hidden">
+          <!-- 通知发送策略配置卡片 -->
+          <div class="notification-strategy-card glass-panel" style="margin-bottom: 1.5rem; padding: 1.15rem 1.25rem; border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+            <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;">
+              <div>
+                <h4 class="channel-builder-title" style="margin: 0; font-size: 0.9375rem; font-weight: 600;">通知发送策略</h4>
+                <p class="text-xs text-muted" style="margin: 4px 0 0 0;">可选择单条异常即时推送，或在指定频率内汇总合并后统一发送，避免告警风暴。</p>
+              </div>
+              <div id="batch-pending-pill" class="badge badge-subtle hidden" style="font-size: 0.75rem; white-space: nowrap;">
+                待发合并队列: <span id="batch-pending-count" style="font-weight: 600;">0</span>
+              </div>
+            </div>
+
+            <div class="settings-grid" style="margin-top: 0.85rem;">
+              <div class="form-group">
+                <label for="setting-notification-mode">推送模式</label>
+                <select id="setting-notification-mode" class="channel-select">
+                  <option value="realtime">实时通知 (每次检测发现异常即刻推送)</option>
+                  <option value="batch">合并通知 (聚合周期内汇总合并后发送)</option>
+                </select>
+              </div>
+
+              <div id="batch-interval-group" class="form-group hidden">
+                <label for="setting-notification-batch-interval">合并发送频率</label>
+                <select id="setting-notification-batch-interval" class="channel-select">
+                  <option value="10m">每 10 分钟汇总一次</option>
+                  <option value="30m">每 30 分钟汇总一次</option>
+                  <option value="1h">每 1 小时汇总一次 (推荐)</option>
+                  <option value="2h">每 2 小时汇总一次</option>
+                  <option value="6h">每 6 小时汇总一次</option>
+                  <option value="12h">每 12 小时汇总一次</option>
+                  <option value="24h">每 24 小时汇总一次 (每日摘要)</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="batch-actions-bar" class="batch-actions-bar hidden" style="margin-top: 0.85rem; padding-top: 0.75rem; border-top: 1px dashed var(--border-color); display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;">
+              <span class="text-xs text-muted">队列中的待处理告警将按频率定时发出，也可手动即刻合并推送。</span>
+              <button type="button" id="btn-flush-batch" class="btn btn-secondary btn-sm" style="flex-shrink: 0;">
+                <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="22" y1="2" x2="11" y2="13"></line>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+                <span>立即发送待合并通知</span>
+              </button>
+            </div>
+          </div>
+
           <!-- 已配置的通知渠道卡片列表 -->
           <div class="form-group">
             <div class="label-with-badge">
@@ -1225,7 +1279,7 @@ wecombot://bot_key"></textarea>
                 <div class="about-info">
                   <div class="about-title-row">
                     <h3 class="about-app-name">Argus</h3>
-                    <span class="about-version-badge">v1.0.0</span>
+                    <span id="about-app-version" class="about-version-badge">v1.0.0</span>
                   </div>
                   <p class="about-app-desc">极简轻量级 SSL 证书与域名监控守护系统</p>
                 </div>
@@ -1455,6 +1509,56 @@ wecombot://bot_key"></textarea>
     </div>
   </div>
 
+  <!-- 系统内部消息中心模态框 -->
+  <div id="modal-notifications-center" class="modal-backdrop hidden" style="z-index: 1045;">
+    <div class="modal-card glass-panel" style="max-width: 720px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="flex-shrink: 0;">
+        <div style="display: flex; align-items: center; gap: 0.65rem;">
+          <h2 class="modal-title" style="margin: 0;">系统消息中心</h2>
+          <span id="center-unread-pill" class="badge badge-subtle hidden">0 条未读</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button type="button" id="btn-refresh-notifications" class="btn btn-ghost btn-icon" title="刷新消息列表">
+            <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M23 4v6h-6"></path>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+          </button>
+          <button type="button" class="modal-close-icon" data-close-modal="modal-notifications-center" title="关闭">&times;</button>
+        </div>
+      </div>
+
+      <div class="notifications-toolbar" style="flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1.5rem; border-bottom: 1px solid var(--border-color); background: var(--bg-subtle);">
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <label class="checkbox-label" style="font-size: 0.8125rem; cursor: pointer; user-select: none;">
+            <input type="checkbox" id="chk-unread-only" />
+            <span>仅显示未读</span>
+          </label>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button type="button" id="btn-mark-all-read" class="btn btn-secondary btn-sm">全部已读</button>
+          <button type="button" id="btn-clear-notifications" class="btn btn-secondary btn-sm text-rose">清空历史</button>
+        </div>
+      </div>
+
+      <div id="notifications-scroll-area" class="modal-body" style="flex: 1; overflow-y: auto; padding: 1.25rem 1.5rem;">
+        <div id="notification-list-container" class="notification-list"></div>
+        <div id="notification-empty-state" class="notification-empty-state hidden">
+          <svg class="icon-lg text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+          </svg>
+          <p style="margin: 0.75rem 0 0 0; color: var(--text-muted); font-size: 0.875rem;">暂无系统通知记录</p>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1.5rem;">
+        <span id="notifications-status-tip" class="text-xs text-muted">监控巡检与告警测试均会自动记录在此</span>
+        <button type="button" class="btn btn-secondary" data-close-modal="modal-notifications-center">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 全局通用危险/二次确认与交互提示模态框 (替代原生浏览器 alert/confirm/prompt) -->
   <div id="modal-confirm" class="modal-backdrop hidden" style="z-index: 1050;">
     <div class="modal-card glass-panel" style="max-width: 440px;">
@@ -1492,6 +1596,6 @@ wecombot://bot_key"></textarea>
     <div class="global-tooltip-arrow"></div>
   </div>
 
-  <script src="/app.js?v=1.0.30"></script>
+  <script src="/app.js?v=1.0.31"></script>
 </body>
 </html>

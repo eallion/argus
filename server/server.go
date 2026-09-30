@@ -25,30 +25,42 @@ import (
 )
 
 type Server struct {
-	db           *db.DB
-	notifierFunc func() *notifier.Notifier
-	triggerCheck func()
-	checkSingle  func(dom *db.Domain) (*db.Domain, error)
-	passkeyMgr   *auth.PasskeyManager
-	assets       fs.FS
-	mux          *http.ServeMux
+	db                 *db.DB
+	version            string
+	notifierFunc       func() *notifier.Notifier
+	triggerCheck       func()
+	checkSingle        func(dom *db.Domain) (*db.Domain, error)
+	passkeyMgr         *auth.PasskeyManager
+	assets             fs.FS
+	mux                *http.ServeMux
+	flushAggregated    func() (int, error)
+	getAggregatedCount func() int
 }
 
 func NewServer(
 	database *db.DB,
+	appVersion string,
 	notifierGetter func() *notifier.Notifier,
 	triggerCheckAll func(),
 	checkSingleDomain func(dom *db.Domain) (*db.Domain, error),
 	assetsFS fs.FS,
+	flushAggregated func() (int, error),
+	getAggregatedCount func() int,
 ) *Server {
+	if appVersion == "" {
+		appVersion = "dev"
+	}
 	s := &Server{
-		db:           database,
-		notifierFunc: notifierGetter,
-		triggerCheck: triggerCheckAll,
-		checkSingle:  checkSingleDomain,
-		passkeyMgr:   auth.NewPasskeyManager(),
-		assets:       assetsFS,
-		mux:          http.NewServeMux(),
+		db:                 database,
+		version:            appVersion,
+		notifierFunc:       notifierGetter,
+		triggerCheck:       triggerCheckAll,
+		checkSingle:        checkSingleDomain,
+		passkeyMgr:         auth.NewPasskeyManager(),
+		assets:             assetsFS,
+		mux:                http.NewServeMux(),
+		flushAggregated:    flushAggregated,
+		getAggregatedCount: getAggregatedCount,
 	}
 
 	// 存量域名首版迁移：将已有根域名与 www 域名默认标记为置顶（仅执行一次，之后用户可自由取消置顶）
@@ -123,6 +135,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/dns/sync-configs/{id}", s.authMiddleware(s.handleDeleteDNSSyncConfig))
 	s.mux.HandleFunc("POST /api/dns/fetch-records", s.authMiddleware(s.handleFetchDNSRecords))
 	s.mux.HandleFunc("POST /api/dns/sync-now", s.authMiddleware(s.handleSyncDNSNow))
+
+	// Internal Notifications & History
+	s.mux.HandleFunc("GET /api/notifications", s.authMiddleware(s.handleGetNotifications))
+	s.mux.HandleFunc("GET /api/notifications/unread-count", s.authMiddleware(s.handleGetUnreadNotificationCount))
+	s.mux.HandleFunc("POST /api/notifications/read", s.authMiddleware(s.handleMarkNotificationsRead))
+	s.mux.HandleFunc("DELETE /api/notifications/{id}", s.authMiddleware(s.handleDeleteNotification))
+	s.mux.HandleFunc("DELETE /api/notifications", s.authMiddleware(s.handleClearNotifications))
+	s.mux.HandleFunc("POST /api/notifications/flush-batch", s.authMiddleware(s.handleFlushBatchNotifications))
 
 	// Embedded Static Assets & SPA fallback
 	fileServer := http.FileServer(http.FS(s.assets))
@@ -1115,6 +1135,13 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	alertThresholds := s.db.GetSetting("alert_thresholds", "30,15,7,3")
 
+	notificationMode := s.db.GetSetting("notification_mode", "realtime")
+	notificationBatchInterval := s.db.GetSetting("notification_batch_interval", "1h")
+	pendingAggregated := 0
+	if s.getAggregatedCount != nil {
+		pendingAggregated = s.getAggregatedCount()
+	}
+
 	shoutrrrRaw := s.db.GetSetting("shoutrrr_urls", "[]")
 	var shoutrrrURLs []string
 	_ = json.Unmarshal([]byte(shoutrrrRaw), &shoutrrrURLs)
@@ -1137,41 +1164,47 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	defaultTheme := s.db.GetSetting("default_theme", "auto")
 
 	settings := map[string]interface{}{
-		"interval":             interval,
-		"threshold_days":       threshold,
-		"alert_thresholds":     alertThresholds,
-		"timeout":              timeout,
-		"shoutrrr_urls":        shoutrrrURLs,
-		"apprise_available":    appriseAvailable,
-		"apprise_enabled":      appriseEnabled,
-		"apprise_api_url":      appriseAPIURL,
-		"apprise_urls":         appriseURLs,
-		"turnstile_enabled":    turnstileEnabled,
-		"turnstile_site_key":   turnstileSiteKey,
-		"turnstile_secret_key": turnstileSecretKey,
-		"icp":                  icp,
-		"mps":                  mps,
-		"default_theme":        defaultTheme,
+		"version":                     s.version,
+		"interval":                    interval,
+		"threshold_days":              threshold,
+		"alert_thresholds":            alertThresholds,
+		"timeout":                     timeout,
+		"notification_mode":           notificationMode,
+		"notification_batch_interval": notificationBatchInterval,
+		"pending_aggregated":          pendingAggregated,
+		"shoutrrr_urls":               shoutrrrURLs,
+		"apprise_available":           appriseAvailable,
+		"apprise_enabled":             appriseEnabled,
+		"apprise_api_url":             appriseAPIURL,
+		"apprise_urls":                appriseURLs,
+		"turnstile_enabled":           turnstileEnabled,
+		"turnstile_site_key":          turnstileSiteKey,
+		"turnstile_secret_key":        turnstileSecretKey,
+		"icp":                         icp,
+		"mps":                         mps,
+		"default_theme":               defaultTheme,
 	}
 	jsonResponse(w, http.StatusOK, settings)
 }
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Interval           string   `json:"interval"`
-		ThresholdDays      int      `json:"threshold_days"`
-		AlertThresholds    string   `json:"alert_thresholds"`
-		Timeout            string   `json:"timeout"`
-		ShoutrrrURLs       []string `json:"shoutrrr_urls"`
-		AppriseEnabled     bool     `json:"apprise_enabled"`
-		AppriseAPIURL      string   `json:"apprise_api_url"`
-		AppriseURLs        []string `json:"apprise_urls"`
-		TurnstileEnabled   bool     `json:"turnstile_enabled"`
-		TurnstileSiteKey   string   `json:"turnstile_site_key"`
-		TurnstileSecretKey string   `json:"turnstile_secret_key"`
-		ICP                string   `json:"icp"`
-		MPS                string   `json:"mps"`
-		DefaultTheme       string   `json:"default_theme"`
+		Interval                  string   `json:"interval"`
+		ThresholdDays             int      `json:"threshold_days"`
+		AlertThresholds           string   `json:"alert_thresholds"`
+		Timeout                   string   `json:"timeout"`
+		NotificationMode          string   `json:"notification_mode"`
+		NotificationBatchInterval string   `json:"notification_batch_interval"`
+		ShoutrrrURLs              []string `json:"shoutrrr_urls"`
+		AppriseEnabled            bool     `json:"apprise_enabled"`
+		AppriseAPIURL             string   `json:"apprise_api_url"`
+		AppriseURLs               []string `json:"apprise_urls"`
+		TurnstileEnabled          bool     `json:"turnstile_enabled"`
+		TurnstileSiteKey          string   `json:"turnstile_site_key"`
+		TurnstileSecretKey        string   `json:"turnstile_secret_key"`
+		ICP                       string   `json:"icp"`
+		MPS                       string   `json:"mps"`
+		DefaultTheme              string   `json:"default_theme"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "请求参数解析错误")
@@ -1199,6 +1232,18 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AlertThresholds == "" {
 		req.AlertThresholds = "30,15,7,3"
+	}
+
+	if req.NotificationMode != "" {
+		if req.NotificationMode != "realtime" && req.NotificationMode != "batch" {
+			req.NotificationMode = "realtime"
+		}
+		_ = s.db.SetSetting("notification_mode", req.NotificationMode)
+	}
+	if req.NotificationBatchInterval != "" {
+		if _, err := time.ParseDuration(req.NotificationBatchInterval); err == nil {
+			_ = s.db.SetSetting("notification_batch_interval", req.NotificationBatchInterval)
+		}
 	}
 
 	shoutrrrJSON, _ := json.Marshal(req.ShoutrrrURLs)
@@ -1244,6 +1289,9 @@ func (s *Server) handleTestNotification(w http.ResponseWriter, r *http.Request) 
 	body := fmt.Sprintf("这是一条来自 Argus 的测试通知。\n发送时间: %s\n如果您收到此消息，说明此告警渠道配置有效。",
 		time.Now().Format("2006-01-02 15:04:05"))
 
+	// 记录系统内部测试消息通知
+	_, _ = s.db.AddNotification(title, body, "info", "系统测试")
+
 	singleURL := strings.TrimSpace(req.URL)
 	if singleURL != "" {
 		if err := n.SendSingle(singleURL, title, body); err != nil {
@@ -1270,6 +1318,128 @@ func (s *Server) handleTestNotification(w http.ResponseWriter, r *http.Request) 
 
 	jsonResponse(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("测试通知已成功推送到 %d 个已配置的通知渠道", count),
+	})
+}
+
+func (s *Server) handleGetNotifications(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			if n > 200 {
+				n = 200
+			}
+			limit = n
+		}
+	}
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if n, err := strconv.Atoi(o); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	unreadOnly := false
+	if u := r.URL.Query().Get("unread_only"); u == "true" || u == "1" {
+		unreadOnly = true
+	}
+
+	list, total, unreadCount, err := s.db.GetNotifications(limit, offset, unreadOnly)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "获取通知列表失败: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"list":         list,
+		"total":        total,
+		"unread_count": unreadCount,
+	})
+}
+
+func (s *Server) handleGetUnreadNotificationCount(w http.ResponseWriter, r *http.Request) {
+	unreadCount, _ := s.db.GetUnreadNotificationCount()
+	pendingAggregated := 0
+	if s.getAggregatedCount != nil {
+		pendingAggregated = s.getAggregatedCount()
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"unread_count":       unreadCount,
+		"pending_aggregated": pendingAggregated,
+	})
+}
+
+func (s *Server) handleMarkNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID  int64 `json:"id"`
+		All bool  `json:"all"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "参数解析失败")
+		return
+	}
+
+	if req.All {
+		if err := s.db.MarkAllNotificationsRead(); err != nil {
+			jsonError(w, http.StatusInternalServerError, "更新失败: "+err.Error())
+			return
+		}
+	} else if req.ID > 0 {
+		if err := s.db.MarkNotificationRead(req.ID); err != nil {
+			jsonError(w, http.StatusInternalServerError, "更新失败: "+err.Error())
+			return
+		}
+	}
+
+	unreadCount, _ := s.db.GetUnreadNotificationCount()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":      true,
+		"unread_count": unreadCount,
+	})
+}
+
+func (s *Server) handleDeleteNotification(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "无效的通知ID")
+		return
+	}
+	if err := s.db.DeleteNotification(id); err != nil {
+		jsonError(w, http.StatusInternalServerError, "删除失败: "+err.Error())
+		return
+	}
+	unreadCount, _ := s.db.GetUnreadNotificationCount()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":      true,
+		"unread_count": unreadCount,
+	})
+}
+
+func (s *Server) handleClearNotifications(w http.ResponseWriter, r *http.Request) {
+	readOnly := r.URL.Query().Get("read_only") == "true"
+	if err := s.db.ClearNotifications(readOnly); err != nil {
+		jsonError(w, http.StatusInternalServerError, "清空失败: "+err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":      true,
+		"unread_count": 0,
+	})
+}
+
+func (s *Server) handleFlushBatchNotifications(w http.ResponseWriter, r *http.Request) {
+	if s.flushAggregated == nil {
+		jsonError(w, http.StatusBadRequest, "当前未启用或未配置合并通知汇总推送")
+		return
+	}
+	count, err := s.flushAggregated()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("执行合并推送失败: %v", err))
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"count":   count,
+		"message": fmt.Sprintf("已成功合并推送 %d 项待处理告警", count),
 	})
 }
 
@@ -1481,7 +1651,7 @@ func (s *Server) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	backup := BackupFile{
-		Version:    "1.0.0",
+		Version:    s.version,
 		ExportTime: now.UTC(),
 		Domains:    backupDomains,
 		Settings:   settings,

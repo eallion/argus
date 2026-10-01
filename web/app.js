@@ -1872,6 +1872,9 @@ function renderGroupTable(groups) {
         <svg class="star-icon" viewBox="0 0 24 24" ${g.isPinned ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2"'}>
           <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
         </svg>
+      </button>
+    `;
+
     const conf = (state.dnsSyncConfigs || []).find(c => (c.domain || '').toLowerCase() === g.apex);
     const apexCronBadge = (conf && conf.cron_spec)
       ? `<span class="badge badge-purple" style="font-size: 0.6875rem; padding: 1px 6px;" title="主域名计划任务: ${escapeHtml(conf.cron_spec)}">计划: ${escapeHtml(conf.cron_spec)}</span>`

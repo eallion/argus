@@ -1269,42 +1269,35 @@ function getMaxAlertThreshold() {
 }
 
 // Target status determination helpers
-function isTargetWarning(d) {
+function isTargetSSLWarning(d) {
+  if (!d || d.check_ssl === false) return false;
   const maxDays = getMaxAlertThreshold();
-  // SSL 警告判定: 开启了 SSL 检查，且状态属于过期、极危、警告、注意、关注(<=maxDays天)、或者检测失败
-  const isSSLWarning = (d.check_ssl !== false) && (
+  if (d.ssl_status === 'pending') return false;
+  if (
     d.ssl_status === 'expired' ||
     d.ssl_status === 'critical' ||
     d.ssl_status === 'warning' ||
     d.ssl_status === 'notice' ||
     d.ssl_status === 'info' ||
-    d.ssl_status === 'error' ||
-    (typeof d.ssl_days_left === 'number' && d.ssl_days_left <= maxDays && d.ssl_status !== 'pending')
-  );
+    d.ssl_status === 'error'
+  ) {
+    return true;
+  }
+  if (typeof d.ssl_days_left === 'number' && d.ssl_days_left <= maxDays) {
+    return true;
+  }
+  return false;
+}
 
-  // 域名到期警告判定: 开启了域名检查，且状态属于过期、极危、警告、注意、关注(<=maxDays天)、或者查询失败
-  const isDomainWarning = !!d.check_domain && (
-    d.domain_status === 'expired' ||
-    d.domain_status === 'critical' ||
-    d.domain_status === 'warning' ||
-    d.domain_status === 'notice' ||
-    d.domain_status === 'info' ||
-    d.domain_status === 'error' ||
-    (typeof d.domain_days_left === 'number' && d.domain_days_left <= maxDays && d.domain_status !== 'pending')
-  );
-
-  return isSSLWarning || isDomainWarning;
+function isTargetWarning(d) {
+  return isTargetSSLWarning(d);
 }
 
 function isTargetHealthy(d) {
-  if (isTargetWarning(d)) return false;
-  const hasCheck = (d.check_ssl !== false) || !!d.check_domain;
-  if (!hasCheck) return false;
-
+  if (isTargetSSLWarning(d)) return false;
+  if (d.check_ssl === false) return false;
   const maxDays = getMaxAlertThreshold();
-  const sslOk = (d.check_ssl === false) || d.ssl_status === 'healthy' || (typeof d.ssl_days_left === 'number' && d.ssl_days_left > maxDays);
-  const domOk = !d.check_domain || d.domain_status === 'healthy' || (typeof d.domain_days_left === 'number' && d.domain_days_left > maxDays);
-  return sslOk && domOk;
+  return d.ssl_status === 'healthy' || (typeof d.ssl_days_left === 'number' && d.ssl_days_left > maxDays);
 }
 
 // 同步更新顶部 KPI 卡片与下方 filter tabs 的 active 选中高亮状态
@@ -1460,13 +1453,14 @@ function buildDomainGroups(domains) {
     let sslHealthy = 0;
     let sslWarning = 0;
     let minSslDaysLeft = Infinity;
+    const maxDays = getMaxAlertThreshold();
 
     group.targets.forEach(t => {
       if (t.check_ssl !== false) {
-        if (t.ssl_status === 'healthy') {
-          sslHealthy++;
-        } else if (isTargetWarning(t)) {
+        if (isTargetSSLWarning(t)) {
           sslWarning++;
+        } else if (t.ssl_status === 'healthy' || (typeof t.ssl_days_left === 'number' && t.ssl_days_left > maxDays)) {
+          sslHealthy++;
         }
         if (typeof t.ssl_days_left === 'number' && t.ssl_days_left >= 0 && t.ssl_days_left < minSslDaysLeft) {
           minSslDaysLeft = t.ssl_days_left;
@@ -1476,12 +1470,9 @@ function buildDomainGroups(domains) {
 
     group.sslHealthy = sslHealthy;
     group.sslWarning = sslWarning;
+    group.hasWarning = sslWarning > 0;
+    group.hasHealthy = sslHealthy > 0;
     group.minSslDaysLeft = minSslDaysLeft === Infinity ? null : minSslDaysLeft;
-
-    // 如果域名注册到期告警，也将整个分组标记为 warning
-    if (group.domainTarget && isTargetWarning(group.domainTarget)) {
-      group.hasWarning = true;
-    }
 
     groupList.push(group);
   });
@@ -1731,13 +1722,22 @@ function renderDashboard() {
     });
 
     // 排序：星标置顶项排在最前，其次有告警，其余按主域名首字母升序
-    filteredGroups.sort((a, b) => {
-      if (a.isPinned && !b.isPinned) return -1;
-      if (!a.isPinned && b.isPinned) return 1;
-      if (a.hasWarning && !b.hasWarning) return -1;
-      if (!a.hasWarning && b.hasWarning) return 1;
-      return a.apex.localeCompare(b.apex);
-    });
+    if (state.activeFilter === 'warning') {
+      filteredGroups.sort((a, b) => {
+        const aMin = typeof a.minSslDaysLeft === 'number' ? a.minSslDaysLeft : 999999;
+        const bMin = typeof b.minSslDaysLeft === 'number' ? b.minSslDaysLeft : 999999;
+        if (aMin !== bMin) return aMin - bMin;
+        return a.apex.localeCompare(b.apex);
+      });
+    } else {
+      filteredGroups.sort((a, b) => {
+        if (a.isPinned && !b.isPinned) return -1;
+        if (!a.isPinned && b.isPinned) return 1;
+        if (a.hasWarning && !b.hasWarning) return -1;
+        if (!a.hasWarning && b.hasWarning) return 1;
+        return a.apex.localeCompare(b.apex);
+      });
+    }
 
     // 分页切片
     const totalCount = filteredGroups.length;
@@ -1758,7 +1758,7 @@ function renderDashboard() {
         return false;
       }
       if (state.activeFilter === 'warning') {
-        return isTargetWarning(d);
+        return isTargetSSLWarning(d);
       }
       if (state.activeFilter === 'healthy') {
         return isTargetHealthy(d);
@@ -1766,15 +1766,29 @@ function renderDashboard() {
       return true;
     });
 
-    // 排序：置顶优先，根域名优先，其余按 ID 升序
-    filtered.sort((a, b) => {
-      const rankDiff = getDomainRank(b) - getDomainRank(a);
-      if (rankDiff !== 0) return rankDiff;
-      const isARoot = a.host.toLowerCase() === currentApex ? 1 : 0;
-      const isBRoot = b.host.toLowerCase() === currentApex ? 1 : 0;
-      if (isBRoot !== isARoot) return isBRoot - isARoot;
-      return a.id - b.id;
-    });
+    if (state.activeFilter === 'warning') {
+      filtered.sort((a, b) => {
+        const getUrgency = (x) => {
+          if (x.ssl_status === 'expired' || x.ssl_days_left < 0) return -999999;
+          if (x.ssl_status === 'error') return -999998;
+          if (typeof x.ssl_days_left === 'number') return x.ssl_days_left;
+          return 999999;
+        };
+        const diff = getUrgency(a) - getUrgency(b);
+        if (diff !== 0) return diff;
+        return a.host.localeCompare(b.host);
+      });
+    } else {
+      // 排序：置顶优先，根域名优先，其余按 ID 升序
+      filtered.sort((a, b) => {
+        const rankDiff = getDomainRank(b) - getDomainRank(a);
+        if (rankDiff !== 0) return rankDiff;
+        const isARoot = a.host.toLowerCase() === currentApex ? 1 : 0;
+        const isBRoot = b.host.toLowerCase() === currentApex ? 1 : 0;
+        if (isBRoot !== isARoot) return isBRoot - isARoot;
+        return a.id - b.id;
+      });
+    }
 
     const totalCount = filtered.length;
     const startIndex = (state.currentPage - 1) * state.pageSize;
@@ -1791,7 +1805,7 @@ function renderDashboard() {
         return false;
       }
       if (state.activeFilter === 'warning') {
-        return isTargetWarning(d);
+        return isTargetSSLWarning(d);
       }
       if (state.activeFilter === 'healthy') {
         return isTargetHealthy(d);
@@ -1799,11 +1813,25 @@ function renderDashboard() {
       return true;
     });
 
-    filtered.sort((a, b) => {
-      const rankDiff = getDomainRank(b) - getDomainRank(a);
-      if (rankDiff !== 0) return rankDiff;
-      return a.id - b.id;
-    });
+    if (state.activeFilter === 'warning') {
+      filtered.sort((a, b) => {
+        const getUrgency = (x) => {
+          if (x.ssl_status === 'expired' || x.ssl_days_left < 0) return -999999;
+          if (x.ssl_status === 'error') return -999998;
+          if (typeof x.ssl_days_left === 'number') return x.ssl_days_left;
+          return 999999;
+        };
+        const diff = getUrgency(a) - getUrgency(b);
+        if (diff !== 0) return diff;
+        return a.host.localeCompare(b.host);
+      });
+    } else {
+      filtered.sort((a, b) => {
+        const rankDiff = getDomainRank(b) - getDomainRank(a);
+        if (rankDiff !== 0) return rankDiff;
+        return a.id - b.id;
+      });
+    }
 
     const totalCount = filtered.length;
     const startIndex = (state.currentPage - 1) * state.pageSize;

@@ -52,3 +52,28 @@ Registrar: RESERVED-Internet Assigned Numbers Authority
 		t.Errorf("unexpected date: %v", expire)
 	}
 }
+
+func TestGetApexDomain(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"example.com", "example.com"},
+		{"www.example.com", "example.com"},
+		{"api.sub.example.com", "example.com"},
+		{"https://app.dev.test.example.com/path", "example.com"},
+		{"test.co.uk", "test.co.uk"},
+		{"sub.test.co.uk", "test.co.uk"},
+		{"api.sub.example.com.cn", "example.com.cn"},
+		{"192.168.1.1", "192.168.1.1"},
+		{"localhost", "localhost"},
+	}
+
+	for _, tt := range tests {
+		got := GetApexDomain(tt.input)
+		if got != tt.expected {
+			t.Errorf("GetApexDomain(%q) = %q, expected %q", tt.input, got, tt.expected)
+		}
+	}
+}
+

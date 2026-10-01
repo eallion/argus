@@ -356,3 +356,44 @@ func IsRootOrWWW(input string) bool {
 	}
 	return IsApexDomain(host)
 }
+
+// GetApexDomain extracts the root/apex domain from a hostname or URL (e.g. sub.example.com -> example.com)
+func GetApexDomain(input string) string {
+	host := strings.TrimSpace(strings.ToLower(input))
+	host = strings.TrimPrefix(host, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	if idx := strings.Index(host, "/"); idx != -1 {
+		host = host[:idx]
+	}
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	if host == "" || host == "localhost" || net.ParseIP(host) != nil {
+		return host
+	}
+	if strings.HasPrefix(host, "www.") {
+		host = strings.TrimPrefix(host, "www.")
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) <= 2 {
+		return host
+	}
+
+	compoundTLDs := map[string]bool{
+		"com.cn": true, "net.cn": true, "org.cn": true, "gov.cn": true, "edu.cn": true,
+		"co.uk": true, "org.uk": true, "me.uk": true, "ac.uk": true,
+		"com.hk": true, "org.hk": true, "edu.hk": true,
+		"com.tw": true, "org.tw": true, "idv.tw": true,
+		"co.jp": true, "ne.jp": true, "or.jp": true,
+		"com.au": true, "net.au": true, "org.au": true,
+	}
+
+	lastTwo := strings.Join(parts[len(parts)-2:], ".")
+	if compoundTLDs[lastTwo] {
+		if len(parts) >= 3 {
+			return strings.Join(parts[len(parts)-3:], ".")
+		}
+		return host
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}

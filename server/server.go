@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"argus/auth"
@@ -20,6 +21,7 @@ import (
 	"argus/db"
 	"argus/dns_provider"
 	"argus/notifier"
+	"argus/schedule"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
@@ -135,6 +137,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/dns/sync-configs/{id}", s.authMiddleware(s.handleDeleteDNSSyncConfig))
 	s.mux.HandleFunc("POST /api/dns/fetch-records", s.authMiddleware(s.handleFetchDNSRecords))
 	s.mux.HandleFunc("POST /api/dns/sync-now", s.authMiddleware(s.handleSyncDNSNow))
+	s.mux.HandleFunc("POST /api/apex/schedule", s.authMiddleware(s.handleSetApexSchedule))
+	s.mux.HandleFunc("POST /api/apex/{apex}/check", s.authMiddleware(s.handleCheckApex))
 
 	// Internal Notifications & History
 	s.mux.HandleFunc("GET /api/notifications", s.authMiddleware(s.handleGetNotifications))
@@ -922,6 +926,7 @@ func (s *Server) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 		HostsList      string `json:"hosts_list"`
 		IsPinned       bool   `json:"is_pinned"`
 		NotifyDisabled bool   `json:"notify_disabled"`
+		CronSpec       string `json:"cron_spec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "请求参数格式错误")
@@ -952,7 +957,15 @@ func (s *Server) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dom, err := s.db.AddDomain(req.Host, req.Port, checkSSL, req.CheckDomain, req.MultiHost, req.HostsList, req.IsPinned, req.NotifyDisabled)
+	req.CronSpec = strings.TrimSpace(req.CronSpec)
+	if req.CronSpec != "" {
+		if err := schedule.ValidateSpec(req.CronSpec); err != nil {
+			jsonError(w, http.StatusBadRequest, "巡检计划格式错误: "+err.Error())
+			return
+		}
+	}
+
+	dom, err := s.db.AddDomain(req.Host, req.Port, checkSSL, req.CheckDomain, req.MultiHost, req.HostsList, req.IsPinned, req.NotifyDisabled, req.CronSpec)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, "添加域名失败（可能已存在该域名）: "+err.Error())
 		return
@@ -982,14 +995,15 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Host           string `json:"host"`
-		Port           string `json:"port"`
-		CheckSSL       *bool  `json:"check_ssl"`
-		CheckDomain    *bool  `json:"check_domain"`
-		MultiHost      bool   `json:"multi_host"`
-		HostsList      string `json:"hosts_list"`
-		IsPinned       *bool  `json:"is_pinned"`
-		NotifyDisabled *bool  `json:"notify_disabled"`
+		Host           string  `json:"host"`
+		Port           string  `json:"port"`
+		CheckSSL       *bool   `json:"check_ssl"`
+		CheckDomain    *bool   `json:"check_domain"`
+		MultiHost      bool    `json:"multi_host"`
+		HostsList      string  `json:"hosts_list"`
+		IsPinned       *bool   `json:"is_pinned"`
+		NotifyDisabled *bool   `json:"notify_disabled"`
+		CronSpec       *string `json:"cron_spec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "请求参数格式错误")
@@ -1034,7 +1048,19 @@ func (s *Server) handleUpdateDomain(w http.ResponseWriter, r *http.Request) {
 		notifyDisabled = *req.NotifyDisabled
 	}
 
-	if err := s.db.UpdateDomain(id, req.Host, req.Port, checkSSL, checkDomain, req.MultiHost, req.HostsList, isPinned, notifyDisabled); err != nil {
+	cronSpec := currentDom.CronSpec
+	if req.CronSpec != nil {
+		trimmed := strings.TrimSpace(*req.CronSpec)
+		if trimmed != "" {
+			if err := schedule.ValidateSpec(trimmed); err != nil {
+				jsonError(w, http.StatusBadRequest, "巡检计划格式错误: "+err.Error())
+				return
+			}
+		}
+		cronSpec = trimmed
+	}
+
+	if err := s.db.UpdateDomain(id, req.Host, req.Port, checkSSL, checkDomain, req.MultiHost, req.HostsList, isPinned, notifyDisabled, cronSpec); err != nil {
 		jsonError(w, http.StatusInternalServerError, "更新域名失败: "+err.Error())
 		return
 	}
@@ -1133,7 +1159,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if threshold <= 0 {
 		threshold = 15
 	}
-	alertThresholds := s.db.GetSetting("alert_thresholds", "30,15,7,3")
+	alertThresholds := s.db.GetSetting("alert_thresholds", "30,15,10,7,5,3,1")
+	alertRuleMode := s.db.GetSetting("alert_rule_mode", "tier_once")
 
 	notificationMode := s.db.GetSetting("notification_mode", "realtime")
 	notificationBatchInterval := s.db.GetSetting("notification_batch_interval", "1h")
@@ -1168,6 +1195,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"interval":                    interval,
 		"threshold_days":              threshold,
 		"alert_thresholds":            alertThresholds,
+		"alert_rule_mode":             alertRuleMode,
 		"timeout":                     timeout,
 		"notification_mode":           notificationMode,
 		"notification_batch_interval": notificationBatchInterval,
@@ -1192,6 +1220,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		Interval                  string   `json:"interval"`
 		ThresholdDays             int      `json:"threshold_days"`
 		AlertThresholds           string   `json:"alert_thresholds"`
+		AlertRuleMode             string   `json:"alert_rule_mode"`
 		Timeout                   string   `json:"timeout"`
 		NotificationMode          string   `json:"notification_mode"`
 		NotificationBatchInterval string   `json:"notification_batch_interval"`
@@ -1231,7 +1260,14 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		req.ThresholdDays = 15
 	}
 	if req.AlertThresholds == "" {
-		req.AlertThresholds = "30,15,7,3"
+		req.AlertThresholds = "30,15,10,7,5,3,1"
+	}
+
+	if req.AlertRuleMode != "" {
+		if req.AlertRuleMode != "tier_once" && req.AlertRuleMode != "daily" {
+			req.AlertRuleMode = "tier_once"
+		}
+		_ = s.db.SetSetting("alert_rule_mode", req.AlertRuleMode)
 	}
 
 	if req.NotificationMode != "" {
@@ -1647,6 +1683,7 @@ func (s *Server) handleExportBackup(w http.ResponseWriter, r *http.Request) {
 			HostsList:      d.HostsList,
 			IsPinned:       d.IsPinned,
 			NotifyDisabled: d.NotifyDisabled,
+			CronSpec:       d.CronSpec,
 		})
 	}
 
@@ -1711,6 +1748,7 @@ func (s *Server) handleImportBackup(w http.ResponseWriter, r *http.Request) {
 			"interval":             true,
 			"threshold_days":       true,
 			"alert_thresholds":     true,
+			"alert_rule_mode":      true,
 			"timeout":              true,
 			"shoutrrr_urls":        true,
 			"apprise_enabled":      true,
@@ -1887,8 +1925,16 @@ func (s *Server) handleSaveDNSSyncConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if c.ProviderID <= 0 {
-		jsonError(w, http.StatusBadRequest, "请选择关联的 DNS 账号凭据")
+	c.CronSpec = strings.TrimSpace(c.CronSpec)
+	if c.CronSpec != "" {
+		if err := schedule.ValidateSpec(c.CronSpec); err != nil {
+			jsonError(w, http.StatusBadRequest, "巡检计划格式错误: "+err.Error())
+			return
+		}
+	}
+
+	if c.AutoSync && c.ProviderID <= 0 {
+		jsonError(w, http.StatusBadRequest, "开启后台定时自动同步时必须选择关联的 DNS 账号凭据")
 		return
 	}
 
@@ -1900,8 +1946,59 @@ func (s *Server) handleSaveDNSSyncConfig(w http.ResponseWriter, r *http.Request)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"id":      c.ID,
-		"message": "主域名同步规则与黑名单已保存",
+		"message": "主域名配置与任务计划已保存",
 	})
+}
+
+func (s *Server) handleSetApexSchedule(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Domain   string `json:"domain"`
+		CronSpec string `json:"cron_spec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "请求参数格式错误")
+		return
+	}
+	req.Domain = strings.TrimRight(strings.ToLower(strings.TrimSpace(req.Domain)), ".")
+	if req.Domain == "" {
+		jsonError(w, http.StatusBadRequest, "主域名不能为空")
+		return
+	}
+	req.CronSpec = strings.TrimSpace(req.CronSpec)
+	if req.CronSpec != "" {
+		if err := schedule.ValidateSpec(req.CronSpec); err != nil {
+			jsonError(w, http.StatusBadRequest, "巡检计划格式错误: "+err.Error())
+			return
+		}
+	}
+	if err := s.db.SetApexCronSpec(req.Domain, req.CronSpec); err != nil {
+		jsonError(w, http.StatusInternalServerError, "保存主域名巡检计划失败: "+err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "已更新主域名巡检计划",
+	})
+}
+
+func (s *Server) handleCheckApex(w http.ResponseWriter, r *http.Request) {
+	apex := r.PathValue("apex")
+	if apex == "" {
+		apex = r.URL.Query().Get("apex")
+	}
+	apex = strings.TrimRight(strings.ToLower(strings.TrimSpace(apex)), ".")
+	if apex == "" {
+		jsonError(w, http.StatusBadRequest, "主域名不能为空")
+		return
+	}
+
+	res, err := s.RunApexCheckAndSync(apex)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "执行主域名巡检失败: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, res)
 }
 
 func (s *Server) handleDeleteDNSSyncConfig(w http.ResponseWriter, r *http.Request) {
@@ -2159,6 +2256,76 @@ func (s *Server) handleSyncDNSNow(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// SyncDNSTasksForConfig runs DNS pull and auto-import for a single DNS sync config
+func (s *Server) SyncDNSTasksForConfig(c *db.DNSSyncConfig) (*db.BatchImportResult, error) {
+	if c.IsDisabled || c.ProviderID <= 0 {
+		return &db.BatchImportResult{}, nil
+	}
+
+	p, err := s.db.GetDNSProviderByID(c.ProviderID)
+	if err != nil {
+		errMsg := "未找到关联的凭据"
+		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	provider, err := dns_provider.GetProvider(p.ProviderType)
+	if err != nil {
+		errMsg := "不支持的厂商类型"
+		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	records, err := provider.FetchRecords(ctx, dns_provider.ProviderConfig{
+		ProviderType: p.ProviderType,
+		AuthKey:      p.AuthKey,
+		AuthSecret:   p.AuthSecret,
+		ZoneID:       c.ZoneID,
+	}, c.Domain)
+	cancel()
+
+	if err != nil {
+		errMsg := "自动拉取失败: " + err.Error()
+		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	var rawNames []string
+	seen := make(map[string]bool)
+	for _, rec := range records {
+		norm := dns_provider.NormalizeDomainName(rec.Name, c.Domain)
+		if norm != "" && !seen[norm] {
+			seen[norm] = true
+			rawNames = append(rawNames, norm)
+		}
+	}
+
+	allowed, blocked := dns_provider.FilterBlacklist(rawNames, c.Domain, c.Blacklist)
+	bCheckSSL := true
+	var items []db.DomainImportItem
+	for _, dom := range allowed {
+		items = append(items, db.DomainImportItem{
+			Host:        dom,
+			Port:        c.DefaultPort,
+			CheckSSL:    &bCheckSSL,
+			CheckDomain: c.CheckDomain,
+			IsPinned:    checker.IsRootOrWWW(dom),
+		})
+	}
+
+	res, err := s.db.BatchAddDomains(items)
+	if err != nil {
+		errMsg := "自动导入失败: " + err.Error()
+		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	statusMsg := fmt.Sprintf("DNS 同步完成：新增 %d 个目标，跳过 %d 个已有目标，过滤 %d 个黑名单子域名", res.Added, res.Skipped, len(blocked))
+	_ = s.db.UpdateDNSSyncResult(c.ID, statusMsg, time.Now().UTC())
+	return res, nil
+}
+
 // SyncAllAutoDNSTasks is called periodically to synchronize domains with auto_sync = true
 func (s *Server) SyncAllAutoDNSTasks() {
 	configs, err := s.db.ListDNSSyncConfigs()
@@ -2167,78 +2334,87 @@ func (s *Server) SyncAllAutoDNSTasks() {
 	}
 
 	for _, c := range configs {
-		if c.IsDisabled || !c.AutoSync {
+		if c.IsDisabled || !c.AutoSync || c.ProviderID <= 0 {
 			continue
 		}
-
-		p, err := s.db.GetDNSProviderByID(c.ProviderID)
-		if err != nil {
-			_ = s.db.UpdateDNSSyncResult(c.ID, "未找到关联的凭据", time.Now().UTC())
-			continue
-		}
-
-		provider, err := dns_provider.GetProvider(p.ProviderType)
-		if err != nil {
-			_ = s.db.UpdateDNSSyncResult(c.ID, "不支持的厂商类型", time.Now().UTC())
-			continue
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-		records, err := provider.FetchRecords(ctx, dns_provider.ProviderConfig{
-			ProviderType: p.ProviderType,
-			AuthKey:      p.AuthKey,
-			AuthSecret:   p.AuthSecret,
-			ZoneID:       c.ZoneID,
-		}, c.Domain)
-		cancel()
-
-		if err != nil {
-			_ = s.db.UpdateDNSSyncResult(c.ID, "自动拉取失败: "+err.Error(), time.Now().UTC())
-			continue
-		}
-
-		var rawNames []string
-		seen := make(map[string]bool)
-		for _, rec := range records {
-			norm := dns_provider.NormalizeDomainName(rec.Name, c.Domain)
-			if norm != "" && !seen[norm] {
-				seen[norm] = true
-				rawNames = append(rawNames, norm)
-			}
-		}
-
-		allowed, blocked := dns_provider.FilterBlacklist(rawNames, c.Domain, c.Blacklist)
-		bCheckSSL := true
-		var items []db.DomainImportItem
-		for _, dom := range allowed {
-			items = append(items, db.DomainImportItem{
-				Host:        dom,
-				Port:        c.DefaultPort,
-				CheckSSL:    &bCheckSSL,
-				CheckDomain: c.CheckDomain,
-				IsPinned:    checker.IsRootOrWWW(dom),
-			})
-		}
-
-		res, err := s.db.BatchAddDomains(items)
-		if err != nil {
-			_ = s.db.UpdateDNSSyncResult(c.ID, "自动导入失败: "+err.Error(), time.Now().UTC())
-			continue
-		}
-
-		if len(res.NewIDs) > 0 {
+		res, err := s.SyncDNSTasksForConfig(&c)
+		if err == nil && res != nil && len(res.NewIDs) > 0 {
 			go func(ids []int64) {
 				for _, id := range ids {
 					dom, err := s.db.GetDomainByID(id)
-					if err == nil {
+					if err == nil && s.checkSingle != nil {
 						_, _ = s.checkSingle(dom)
 					}
 				}
 			}(res.NewIDs)
 		}
-
-		statusMsg := fmt.Sprintf("自动同步完成：新增 %d 个目标，跳过 %d 个已有目标，过滤 %d 个黑名单子域名", res.Added, res.Skipped, len(blocked))
-		_ = s.db.UpdateDNSSyncResult(c.ID, statusMsg, time.Now().UTC())
 	}
 }
+
+type ApexCheckResult struct {
+	Apex        string `json:"apex"`
+	SyncedAdded int    `json:"synced_added"`
+	TotalTarget int    `json:"total_target"`
+	CheckCount  int    `json:"check_count"`
+	Message     string `json:"message"`
+}
+
+// RunApexCheckAndSync performs DNS sync first (if DNS API is configured), then checks all subdomains under apex
+func (s *Server) RunApexCheckAndSync(apex string) (*ApexCheckResult, error) {
+	normApex := strings.TrimRight(strings.ToLower(strings.TrimSpace(apex)), ".")
+	if normApex == "" {
+		return nil, fmt.Errorf("apex domain cannot be empty")
+	}
+
+	result := &ApexCheckResult{Apex: normApex}
+
+	// 1. 若配置了主域名同步规则且有有效 API 凭据，先从 DNS 同步一次域名并过滤黑名单
+	conf, err := s.db.GetDNSSyncConfigByDomain(normApex)
+	if err == nil && conf != nil && !conf.IsDisabled && conf.ProviderID > 0 {
+		syncRes, syncErr := s.SyncDNSTasksForConfig(conf)
+		if syncErr == nil && syncRes != nil {
+			result.SyncedAdded = syncRes.Added
+		}
+	}
+
+	// 2. 加载属于该主域名的所有子域名
+	allDomains, err := s.db.GetAllDomains()
+	if err != nil {
+		return nil, err
+	}
+
+	var apexTargets []db.Domain
+	for _, d := range allDomains {
+		if checker.GetApexDomain(d.Host) == normApex {
+			apexTargets = append(apexTargets, d)
+		}
+	}
+	result.TotalTarget = len(apexTargets)
+
+	if len(apexTargets) == 0 {
+		result.Message = fmt.Sprintf("主域名 %s 下暂无监控目标", normApex)
+		return result, nil
+	}
+
+	// 3. 并发发起巡检
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for _, target := range apexTargets {
+		wg.Add(1)
+		go func(d db.Domain) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if s.checkSingle != nil {
+				_, _ = s.checkSingle(&d)
+			}
+		}(target)
+	}
+	wg.Wait()
+
+	result.CheckCount = len(apexTargets)
+	result.Message = fmt.Sprintf("已完成 %s 巡检：同步新增 %d 个目标，检测 %d 个监控目标", normApex, result.SyncedAdded, result.CheckCount)
+	return result, nil
+}
+
 

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=1.0.31" />
+  <link rel="stylesheet" href="/style.css?v=1.0.2" />
   <script>
     (function() {
       try {
@@ -252,12 +252,12 @@
             </svg>
           </div>
           <div class="kpi-info">
-            <div class="kpi-label">临期与告警阶梯 (30/15/7/3)</div>
+            <div class="kpi-label">临期预警目标</div>
             <div id="kpi-warning-count" class="kpi-value text-amber">0</div>
           </div>
         </div>
 
-        <div id="kpi-card-policy" class="kpi-card glass-panel" role="button" tabindex="0" title="点击查看告警策略配置">
+        <div id="kpi-card-policy" class="kpi-card glass-panel" role="button" tabindex="0" title="点击打开告警策略设置">
           <div class="kpi-icon icon-purple">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="10"></circle>
@@ -266,7 +266,7 @@
           </div>
           <div class="kpi-info">
             <div class="kpi-label">告警阶梯策略</div>
-            <div id="kpi-policy" class="kpi-value-sm">阶梯: 30, 15, 7, 3 天</div>
+            <div id="kpi-policy" class="kpi-value-sm">阶梯: 30, 15, 10, 7, 5, 3, 1 天</div>
           </div>
         </div>
       </section>
@@ -380,6 +380,11 @@
         <div class="form-group" id="form-group-port">
           <label for="form-domain-port">TLS 端口</label>
           <input type="text" id="form-domain-port" value="443" placeholder="443" />
+        </div>
+        <div class="form-group" id="form-group-cron-spec">
+          <label for="form-domain-cron-spec">独立巡检任务计划 (可选)</label>
+          <input type="text" id="form-domain-cron-spec" placeholder="例如：12h、1d、0 */6 * * *（留空则跟随主域名或系统默认随机打散）" />
+          <small class="form-help">支持自然语言周期（如 12h, 1d, 3d）或标准 5 位 Cron 表达式。单独设置后将按指定周期独立发起巡检。</small>
         </div>
         <div class="form-group form-checkbox">
           <label class="checkbox-label">
@@ -940,23 +945,98 @@ another-site.net"></textarea>
           </div>
         </div>
 
-        <!-- 标签页 2：巡检与告警阶梯 -->
+        <!-- 标签页 2：巡检与告警策略 -->
         <div id="tab-policy" class="settings-panel hidden">
-          <div class="settings-grid">
-            <div class="form-group">
-              <label for="cfg-interval">巡检执行周期</label>
-              <input type="text" id="cfg-interval" required placeholder="例如: 12h, 6h, 1h, 24h" />
-              <small class="form-help">例如: 1h、6h、12h、24h</small>
+          <div class="security-card" style="margin-bottom: 1.25rem;">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">巡检与连接参数</h3>
+                <p class="security-desc">配置系统后台探测执行周期与单次网络连接超时时间。</p>
+              </div>
             </div>
-            <div class="form-group">
-              <label for="cfg-thresholds">告警天数阶梯</label>
-              <input type="text" id="cfg-thresholds" required value="30,15,7,3" placeholder="30,15,7,3" />
-              <small class="form-help">&lt;7 天橙色警告，&lt;3 天红色警告</small>
+            <div class="settings-grid">
+              <div class="form-group">
+                <label for="cfg-interval">巡检执行周期</label>
+                <input type="text" id="cfg-interval" required placeholder="例如: 12h, 6h, 1h, 24h" />
+                <small class="form-help">例如: 1h、6h、12h、24h</small>
+              </div>
+              <div class="form-group">
+                <label for="cfg-timeout">单次网络超时时间</label>
+                <input type="text" id="cfg-timeout" required placeholder="10s" />
+                <small class="form-help">例如: 5s, 10s</small>
+              </div>
             </div>
-            <div class="form-group">
-              <label for="cfg-timeout">单次网络超时时间</label>
-              <input type="text" id="cfg-timeout" required placeholder="10s" />
-              <small class="form-help">例如: 5s, 10s</small>
+          </div>
+
+          <hr class="modal-divider" />
+
+          <div class="security-card" style="margin-bottom: 1.25rem;">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">告警天数阶梯</h3>
+                <p class="security-desc">勾选需要触发告警通知的剩余天数档位，支持多选以及填写自定义天数。</p>
+              </div>
+            </div>
+            
+            <div class="tier-checkboxes-grid">
+              <label class="tier-chip-checkbox">
+                <input type="checkbox" class="cfg-tier-checkbox" value="30" />
+                <span>30 天</span>
+              </label>
+              <label class="tier-chip-checkbox">
+                <input type="checkbox" class="cfg-tier-checkbox" value="15" />
+                <span>15 天</span>
+              </label>
+              <label class="tier-chip-checkbox">
+                <input type="checkbox" class="cfg-tier-checkbox" value="10" />
+                <span>10 天</span>
+              </label>
+              <label class="tier-chip-checkbox">
+                <input type="checkbox" class="cfg-tier-checkbox" value="7" />
+                <span>7 天</span>
+              </label>
+              <label class="tier-chip-checkbox">
+                <input type="checkbox" class="cfg-tier-checkbox" value="5" />
+                <span>5 天</span>
+              </label>
+              <label class="tier-chip-checkbox">
+                <input type="checkbox" class="cfg-tier-checkbox" value="3" />
+                <span>3 天</span>
+              </label>
+              <label class="tier-chip-checkbox">
+                <input type="checkbox" class="cfg-tier-checkbox" value="1" />
+                <span>1 天</span>
+              </label>
+              <label class="tier-chip-checkbox">
+                <input type="checkbox" id="cfg-tier-custom-enable" />
+                <span>自定义</span>
+              </label>
+            </div>
+
+            <div id="cfg-tier-custom-wrapper" class="form-group hidden" style="margin-top: 0.85rem;">
+              <label for="cfg-threshold-custom">自定义阶梯天数</label>
+              <input type="text" id="cfg-threshold-custom" placeholder="输入其他天数，多个天数用英文逗号隔开，例如: 60, 45" />
+              <small class="form-help">自定义天数将自动与标准阶梯合并并按降序生效</small>
+            </div>
+            <!-- 隐藏的统一阶梯存储字段，供通用逻辑读取 -->
+            <input type="hidden" id="cfg-thresholds" value="30,15,10,7,5,3,1" />
+          </div>
+
+          <hr class="modal-divider" />
+
+          <div class="security-card">
+            <div class="security-header">
+              <div>
+                <h3 class="security-title">通知触发规则</h3>
+                <p class="security-desc">设置目标处于告警阶梯范围内的通知频次与去重策略。</p>
+              </div>
+            </div>
+            <div class="form-group" style="max-width: 100%;">
+              <select id="cfg-alert-rule-mode" class="channel-select">
+                <option value="tier_once">按阶梯单次通知 (第一档通知一次、第二档再通知一次，中间不通知；续期不通知)</option>
+                <option value="daily">每天通知 (处于设定的临期阶梯天数内时，每天巡检均发送一次通知)</option>
+              </select>
+              <small class="form-help">推荐选择「按阶梯单次通知」，避免每天重复收到处于相同到期区间的冗余消息。</small>
             </div>
           </div>
         </div>
@@ -1477,6 +1557,12 @@ wecombot://bot_key"></textarea>
         </div>
 
         <div class="form-group mt-2">
+          <label for="edit-api-cron-spec">主域名巡检任务计划 (可选)</label>
+          <input type="text" id="edit-api-cron-spec" placeholder="例如：12h、1d、0 */6 * * *（留空则使用系统默认间隔与打散机制）" />
+          <small class="form-help">支持自然语言周期（如 12h, 1d, 3d）或标准 5 位 Cron 表达式。触发巡检时将先自动同步 DNS 记录（遵守黑名单）再巡检所有子域名。</small>
+        </div>
+
+        <div class="form-group mt-2">
           <label class="checkbox-label">
             <input type="checkbox" id="edit-api-auto-sync" />
             <span>开启后台定时自动拉取最新解析记录并过滤同步</span>
@@ -1596,6 +1682,6 @@ wecombot://bot_key"></textarea>
     <div class="global-tooltip-arrow"></div>
   </div>
 
-  <script src="/app.js?v=1.0.31"></script>
+  <script src="/app.js?v=1.0.2"></script>
 </body>
 </html>

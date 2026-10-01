@@ -339,17 +339,19 @@ function updateSettingsFooter(tabId) {
 }
 
 // Settings Tab switcher
+function switchSettingsTab(tabId) {
+  document.querySelectorAll('.settings-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tabId);
+  });
+  document.querySelectorAll('.settings-panel').forEach(p => {
+    p.classList.toggle('hidden', p.id !== tabId);
+  });
+  updateSettingsFooter(tabId);
+}
+
 document.querySelectorAll('.settings-tab').forEach(tab => {
   tab.addEventListener('click', () => {
-    document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.settings-panel').forEach(p => p.classList.add('hidden'));
-
-    tab.classList.add('active');
-    const targetPanel = document.getElementById(tab.dataset.tab);
-    if (targetPanel) {
-      targetPanel.classList.remove('hidden');
-    }
-    updateSettingsFooter(tab.dataset.tab);
+    switchSettingsTab(tab.dataset.tab);
   });
 });
 
@@ -1050,8 +1052,10 @@ async function loadSettings() {
 }
 
 function updatePolicyKPI() {
-  if (state.settings) {
-    elements.kpiPolicy.textContent = `阶梯: ${state.settings.alert_thresholds || '30, 15, 7, 3'} 天`;
+  if (state.settings && elements.kpiPolicy) {
+    const raw = state.settings.alert_thresholds || '30, 15, 10, 7, 5, 3, 1';
+    const modeDesc = state.settings.alert_rule_mode === 'daily' ? '每日' : '阶梯';
+    elements.kpiPolicy.textContent = `阶梯: ${raw} 天 (${modeDesc})`;
   }
 }
 
@@ -1256,9 +1260,18 @@ document.getElementById('btn-add-passkey').addEventListener('click', async () =>
   }
 });
 
-// Target status determination helpers (30, 15, 7, 3 tiers)
+function getMaxAlertThreshold() {
+  if (state.settings && state.settings.alert_thresholds) {
+    const list = state.settings.alert_thresholds.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
+    if (list.length > 0) return Math.max(...list);
+  }
+  return 30;
+}
+
+// Target status determination helpers
 function isTargetWarning(d) {
-  // SSL 警告判定: 开启了 SSL 检查，且状态属于过期、极危、警告、注意、关注(<=30天)、或者检测失败
+  const maxDays = getMaxAlertThreshold();
+  // SSL 警告判定: 开启了 SSL 检查，且状态属于过期、极危、警告、注意、关注(<=maxDays天)、或者检测失败
   const isSSLWarning = (d.check_ssl !== false) && (
     d.ssl_status === 'expired' ||
     d.ssl_status === 'critical' ||
@@ -1266,10 +1279,10 @@ function isTargetWarning(d) {
     d.ssl_status === 'notice' ||
     d.ssl_status === 'info' ||
     d.ssl_status === 'error' ||
-    (typeof d.ssl_days_left === 'number' && d.ssl_days_left <= 30 && d.ssl_status !== 'pending')
+    (typeof d.ssl_days_left === 'number' && d.ssl_days_left <= maxDays && d.ssl_status !== 'pending')
   );
 
-  // 域名到期警告判定: 开启了域名检查，且状态属于过期、极危、警告、注意、关注(<=30天)、或者查询失败
+  // 域名到期警告判定: 开启了域名检查，且状态属于过期、极危、警告、注意、关注(<=maxDays天)、或者查询失败
   const isDomainWarning = !!d.check_domain && (
     d.domain_status === 'expired' ||
     d.domain_status === 'critical' ||
@@ -1277,7 +1290,7 @@ function isTargetWarning(d) {
     d.domain_status === 'notice' ||
     d.domain_status === 'info' ||
     d.domain_status === 'error' ||
-    (typeof d.domain_days_left === 'number' && d.domain_days_left <= 30 && d.domain_status !== 'pending')
+    (typeof d.domain_days_left === 'number' && d.domain_days_left <= maxDays && d.domain_status !== 'pending')
   );
 
   return isSSLWarning || isDomainWarning;
@@ -1288,8 +1301,9 @@ function isTargetHealthy(d) {
   const hasCheck = (d.check_ssl !== false) || !!d.check_domain;
   if (!hasCheck) return false;
 
-  const sslOk = (d.check_ssl === false) || d.ssl_status === 'healthy' || (typeof d.ssl_days_left === 'number' && d.ssl_days_left > 30);
-  const domOk = !d.check_domain || d.domain_status === 'healthy' || (typeof d.domain_days_left === 'number' && d.domain_days_left > 30);
+  const maxDays = getMaxAlertThreshold();
+  const sslOk = (d.check_ssl === false) || d.ssl_status === 'healthy' || (typeof d.ssl_days_left === 'number' && d.ssl_days_left > maxDays);
+  const domOk = !d.check_domain || d.domain_status === 'healthy' || (typeof d.domain_days_left === 'number' && d.domain_days_left > maxDays);
   return sslOk && domOk;
 }
 
@@ -1858,8 +1872,10 @@ function renderGroupTable(groups) {
         <svg class="star-icon" viewBox="0 0 24 24" ${g.isPinned ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2"'}>
           <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
         </svg>
-      </button>
-    `;
+    const conf = (state.dnsSyncConfigs || []).find(c => (c.domain || '').toLowerCase() === g.apex);
+    const apexCronBadge = (conf && conf.cron_spec)
+      ? `<span class="badge badge-purple" style="font-size: 0.6875rem; padding: 1px 6px;" title="主域名计划任务: ${escapeHtml(conf.cron_spec)}">计划: ${escapeHtml(conf.cron_spec)}</span>`
+      : '';
 
     return `
       <tr class="apex-row" data-apex="${escapeHtml(g.apex)}">
@@ -1874,6 +1890,7 @@ function renderGroupTable(groups) {
               </svg>
               <span>${escapeHtml(g.apex)}</span>
             </a>
+            ${apexCronBadge}
           </div>
         </td>
         <td>
@@ -2007,6 +2024,7 @@ function renderSubdomainTable(domains) {
     const lastCheckedFull = dom.last_checked_at ? `最后检测: ${new Date(dom.last_checked_at).toLocaleString('zh-CN', { hour12: false })}` : '尚未检测';
     const targetUrl = `https://${dom.host}${dom.port && dom.port !== '443' ? ':' + dom.port : ''}`;
     const multiHostBadge = (dom.check_ssl !== false && dom.multi_host) ? `<span class="status-badge badge-purple" data-tooltip="多主机模式（已配置指定探测节点）">多主机</span>` : '';
+    const cronTag = dom.cron_spec ? `<span class="badge badge-purple" style="font-size: 0.6875rem; padding: 1px 6px;" title="独立巡检计划: ${escapeHtml(dom.cron_spec)}">计划: ${escapeHtml(dom.cron_spec)}</span>` : '';
 
     let pinBtn = '';
     if (dom.is_pinned) {
@@ -2038,6 +2056,7 @@ function renderSubdomainTable(domains) {
             <a href="${targetUrl}" target="_blank" rel="noopener noreferrer" class="host-name" data-tooltip="${escapeHtml(dom.host)}">${escapeHtml(dom.host)}</a>
             ${dom.port && dom.port !== '443' ? `<span class="port-tag">:${dom.port}</span>` : ''}
             ${multiHostBadge}
+            ${cronTag}
             ${muteBadge}
           </div>
         </td>
@@ -2321,19 +2340,12 @@ function attachGroupEvents() {
       if (!apex) return;
       btn.classList.add('spinning');
       try {
-        const groups = buildDomainGroups(state.domains);
-        const group = groups.find(g => g.apex === apex);
-        if (group && group.targets.length > 0) {
-          showToast(`正在刷新 ${apex} 下的 ${group.targets.length} 个监控目标...`, 'info');
-          for (const t of group.targets) {
-            try {
-              await api(`/api/domains/${t.id}/check`, { method: 'POST' });
-            } catch (err) {}
-          }
-          await loadDomains();
-          showToast(`已刷新 ${apex} 下全部目标`, 'success');
-        }
+        showToast(`正在从 DNS 同步并巡检 ${apex} 下的监控目标...`, 'info');
+        const res = await api(`/api/apex/${encodeURIComponent(apex)}/check`, { method: 'POST' });
+        await Promise.all([loadDomains(), loadDNSData()]);
+        showToast(res.message || `已完成 ${apex} 巡检`, 'success');
       } catch (err) {
+        showToast(err.message || `巡检 ${apex} 失败`, 'error');
       } finally {
         btn.classList.remove('spinning');
       }
@@ -2390,6 +2402,8 @@ function attachActionEvents() {
       document.getElementById('form-domain-port').value = dom.port || '443';
       document.getElementById('form-domain-is-pinned').checked = !!dom.is_pinned;
       document.getElementById('form-domain-notify-disabled').checked = !!dom.notify_disabled;
+      const cronSpecInput = document.getElementById('form-domain-cron-spec');
+      if (cronSpecInput) cronSpecInput.value = dom.cron_spec || '';
       const checkSSL = dom.check_ssl !== false;
       document.getElementById('form-domain-check-ssl').checked = checkSSL;
       document.getElementById('form-domain-check-reg').checked = dom.check_domain;
@@ -2591,15 +2605,15 @@ if (elements.kpiCards) {
   });
 }
 
-// 顶部“临期与告警阶梯”卡片点击联动筛选告警目标
+// 顶部“告警阶梯策略”卡片点击快捷打开设置中的策略tab，跟当前页面的域名筛选无关
 if (elements.kpiCardPolicy) {
   elements.kpiCardPolicy.addEventListener('click', () => {
-    setActiveFilter('warning');
+    openSettingsModal('tab-policy');
   });
   elements.kpiCardPolicy.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      setActiveFilter('warning');
+      openSettingsModal('tab-policy');
     }
   });
 }
@@ -2612,6 +2626,8 @@ elements.btnAddModal.addEventListener('click', () => {
   document.getElementById('form-domain-port').value = '443';
   document.getElementById('form-domain-is-pinned').checked = false;
   document.getElementById('form-domain-notify-disabled').checked = false;
+  const cronSpecInput = document.getElementById('form-domain-cron-spec');
+  if (cronSpecInput) cronSpecInput.value = '';
   document.getElementById('form-domain-check-ssl').checked = true;
   document.getElementById('form-domain-check-reg').checked = false; // 默认不勾选 RDAP
   document.getElementById('form-domain-multi-host').checked = false;
@@ -2633,6 +2649,7 @@ elements.domainForm.addEventListener('submit', async (e) => {
   const port = document.getElementById('form-domain-port').value.trim() || '443';
   const is_pinned = document.getElementById('form-domain-is-pinned').checked;
   const notify_disabled = document.getElementById('form-domain-notify-disabled').checked;
+  const cron_spec = (document.getElementById('form-domain-cron-spec')?.value || '').trim();
   const check_ssl = document.getElementById('form-domain-check-ssl').checked;
   const check_domain = document.getElementById('form-domain-check-reg').checked;
   const multi_host = document.getElementById('form-domain-multi-host').checked;
@@ -2651,7 +2668,7 @@ elements.domainForm.addEventListener('submit', async (e) => {
     hosts_list = JSON.stringify(state.formMultiHostNodes);
   }
 
-  const payload = { host, port, check_ssl, check_domain, multi_host: check_ssl && multi_host, hosts_list, is_pinned, notify_disabled };
+  const payload = { host, port, check_ssl, check_domain, multi_host: check_ssl && multi_host, hosts_list, is_pinned, notify_disabled, cron_spec };
 
   try {
     if (id) {
@@ -3504,15 +3521,58 @@ if (btnAddChannel) {
   });
 }
 
-// Settings Modal Open
-elements.btnSettingsModal.addEventListener('click', () => {
+// 自定义阶梯勾选联动切换
+const tierCustomEnable = document.getElementById('cfg-tier-custom-enable');
+const tierCustomWrapper = document.getElementById('cfg-tier-custom-wrapper');
+const thresholdCustomInput = document.getElementById('cfg-threshold-custom');
+if (tierCustomEnable && tierCustomWrapper) {
+  tierCustomEnable.addEventListener('change', () => {
+    if (tierCustomEnable.checked) {
+      tierCustomWrapper.classList.remove('hidden');
+      if (thresholdCustomInput) thresholdCustomInput.focus();
+    } else {
+      tierCustomWrapper.classList.add('hidden');
+    }
+  });
+}
+
+function populateSettingsModal() {
   if (!state.settings) return;
 
   resetChannelForm();
   document.getElementById('cfg-interval').value = state.settings.interval;
-  document.getElementById('cfg-thresholds').value = state.settings.alert_thresholds || '30,15,7,3';
   document.getElementById('cfg-timeout').value = state.settings.timeout;
-  
+
+  // 1. 回填告警天数阶梯多选勾选与自定义
+  const standardTiers = [30, 15, 10, 7, 5, 3, 1];
+  const rawTiersStr = state.settings.alert_thresholds || '30,15,10,7,5,3,1';
+  const hiddenThresholds = document.getElementById('cfg-thresholds');
+  if (hiddenThresholds) hiddenThresholds.value = rawTiersStr;
+
+  const currentTiers = rawTiersStr.split(/[,，\s]+/).map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
+
+  document.querySelectorAll('.cfg-tier-checkbox').forEach(cb => {
+    const val = parseInt(cb.value, 10);
+    cb.checked = currentTiers.includes(val);
+  });
+
+  const customTiers = currentTiers.filter(n => !standardTiers.includes(n));
+  if (customTiers.length > 0) {
+    if (tierCustomEnable) tierCustomEnable.checked = true;
+    if (thresholdCustomInput) thresholdCustomInput.value = customTiers.join(', ');
+    if (tierCustomWrapper) tierCustomWrapper.classList.remove('hidden');
+  } else {
+    if (tierCustomEnable) tierCustomEnable.checked = false;
+    if (thresholdCustomInput) thresholdCustomInput.value = '';
+    if (tierCustomWrapper) tierCustomWrapper.classList.add('hidden');
+  }
+
+  // 2. 回填通知触发规则选项
+  const ruleModeSelect = document.getElementById('cfg-alert-rule-mode');
+  if (ruleModeSelect) {
+    ruleModeSelect.value = state.settings.alert_rule_mode || 'tier_once';
+  }
+
   state.editingChannels = [...(state.settings.shoutrrr_urls || [])];
   renderConfiguredChannels();
 
@@ -3548,19 +3608,57 @@ elements.btnSettingsModal.addEventListener('click', () => {
   renderAppriseStatus();
   renderSecuritySettings();
   loadDNSData();
+}
 
-  const activeTab = document.querySelector('.settings-tab.active');
-  updateSettingsFooter(activeTab ? activeTab.dataset.tab : 'tab-general');
-
+function openSettingsModal(targetTab = 'tab-general') {
+  if (!state.settings) return;
+  populateSettingsModal();
+  switchSettingsTab(targetTab);
   openModal('modal-settings');
+}
+
+// Settings Modal Open
+elements.btnSettingsModal.addEventListener('click', () => {
+  openSettingsModal('tab-general');
 });
 
 // Settings Form Submit
 elements.settingsForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const interval = document.getElementById('cfg-interval').value.trim();
-  const alert_thresholds = document.getElementById('cfg-thresholds').value.trim() || '30,15,7,3';
   const timeout = document.getElementById('cfg-timeout').value.trim();
+
+  // 组装勾选的阶梯与自定义阶梯
+  const selectedTiers = [];
+  document.querySelectorAll('.cfg-tier-checkbox:checked').forEach(cb => {
+    const val = parseInt(cb.value, 10);
+    if (!isNaN(val) && val > 0 && !selectedTiers.includes(val)) {
+      selectedTiers.push(val);
+    }
+  });
+
+  if (tierCustomEnable && tierCustomEnable.checked && thresholdCustomInput) {
+    const customVal = thresholdCustomInput.value.trim();
+    if (customVal) {
+      customVal.split(/[,，\s]+/).forEach(s => {
+        const val = parseInt(s.trim(), 10);
+        if (!isNaN(val) && val > 0 && !selectedTiers.includes(val)) {
+          selectedTiers.push(val);
+        }
+      });
+    }
+  }
+
+  if (selectedTiers.length === 0) {
+    selectedTiers.push(30, 15, 10, 7, 5, 3, 1);
+  }
+  selectedTiers.sort((a, b) => b - a);
+  const alert_thresholds = selectedTiers.join(',');
+  const hiddenThresholds = document.getElementById('cfg-thresholds');
+  if (hiddenThresholds) hiddenThresholds.value = alert_thresholds;
+
+  const alert_rule_mode = document.getElementById('cfg-alert-rule-mode') ? document.getElementById('cfg-alert-rule-mode').value : 'tier_once';
+
   const shoutrrrRaw = state.editingChannels || [];
   const apprise_enabled = elements.appriseEnabledCheck.checked && state.settings.apprise_available;
   const apprise_api_url = document.getElementById('cfg-apprise-api').value.trim();
@@ -3581,6 +3679,7 @@ elements.settingsForm.addEventListener('submit', async (e) => {
     interval,
     threshold_days: 15,
     alert_thresholds,
+    alert_rule_mode,
     timeout,
     notification_mode,
     notification_batch_interval,
@@ -3604,6 +3703,8 @@ elements.settingsForm.addEventListener('submit', async (e) => {
     showToast('系统与安全设置已更新', 'success');
     closeModal('modal-settings');
     await loadSettings();
+    updatePolicyKPI();
+    renderDashboard();
   } catch (err) {
     // Handled in api()
   }
@@ -3821,6 +3922,7 @@ function renderDNSSyncConfigsList() {
           <div class="dns-card-title">
             <span class="text-main font-bold font-mono">${escapeHtml(c.domain)}</span>
             <span class="badge badge-purple">${escapeHtml(c.provider_name || c.provider_type || 'DNS 凭据')}</span>
+            ${c.cron_spec ? `<span class="badge badge-purple" title="定时巡检计划: ${escapeHtml(c.cron_spec)}">计划: ${escapeHtml(c.cron_spec)}</span>` : ''}
             ${c.auto_sync ? '<span class="badge badge-emerald">自动巡检同步</span>' : '<span class="badge badge-gray">手动同步</span>'}
           </div>
           <div class="dns-card-sub flex flex-col gap-1 mt-1">
@@ -4395,6 +4497,12 @@ window.handleEditDomainAPI = function(apex) {
     blacklistInput.value = (conf && conf.blacklist && conf.blacklist.length > 0) ? conf.blacklist.join('\n') : '';
   }
 
+  // 6.5 主域名巡检计划
+  const cronSpecInput = document.getElementById('edit-api-cron-spec');
+  if (cronSpecInput) {
+    cronSpecInput.value = conf ? (conf.cron_spec || '') : '';
+  }
+
   // 7. 自动同步与 RDAP 检查
   const autoSyncCheck = document.getElementById('edit-api-auto-sync');
   if (autoSyncCheck) autoSyncCheck.checked = conf ? !!conf.auto_sync : true;
@@ -4460,6 +4568,7 @@ async function saveDomainAPIConfig(triggerSyncNow = false) {
   const configId = parseInt(document.getElementById('edit-api-config-id').value || '0', 10);
   const zoneId = (document.getElementById('edit-api-zone-id').value || '').trim();
   const defaultPort = (document.getElementById('edit-api-default-port').value || '443').trim();
+  const cronSpec = (document.getElementById('edit-api-cron-spec')?.value || '').trim();
   const rawBlacklist = document.getElementById('edit-api-blacklist').value || '';
   const autoSync = document.getElementById('edit-api-auto-sync').checked;
   const checkDomain = document.getElementById('edit-api-check-domain').checked;
@@ -4469,8 +4578,8 @@ async function saveDomainAPIConfig(triggerSyncNow = false) {
     showToast('主域名不能为空', 'error');
     return;
   }
-  if (!providerId) {
-    showToast('请选择关联的 DNS 账号凭据', 'error');
+  if (autoSync && !providerId) {
+    showToast('开启后台自动同步时必须选择关联的 DNS 账号凭据', 'error');
     return;
   }
 
@@ -4491,6 +4600,7 @@ async function saveDomainAPIConfig(triggerSyncNow = false) {
         auto_sync: autoSync,
         check_domain: checkDomain,
         is_disabled: isDisabled,
+        cron_spec: cronSpec,
         default_port: defaultPort,
       }),
     });
@@ -4807,58 +4917,158 @@ function renderNotificationList() {
 
     return `
       <div class="notification-item level-${level} ${isUnread ? 'unread' : ''}" data-id="${item.id}">
-        <div class="notification-item-header">
+        <div class="notification-item-header" role="button" tabindex="0" title="点击展开/收起详情">
           <div class="notification-title-wrap">
-            ${isUnread ? '<span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--color-blue);"></span>' : ''}
+            ${isUnread ? '<span class="notification-unread-dot"></span>' : ''}
             <span class="notification-item-title">${escapeHtml(item.title)}</span>
             ${levelBadge}
             ${typeBadge}
             ${targetBadge}
           </div>
-          <span class="notification-time">${escapeHtml(formattedTime)}</span>
+          <div class="notification-header-right">
+            <span class="notification-time">${escapeHtml(formattedTime)}</span>
+            <svg class="notification-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
         </div>
-        <div class="notification-item-body">${escapeHtml(item.content)}</div>
-        <div class="notification-item-actions">
-          ${isUnread ? `<button type="button" class="btn btn-ghost btn-sm btn-mark-one-read" data-id="${item.id}" style="font-size:0.75rem;">标为已读</button>` : ''}
-          <button type="button" class="btn btn-ghost btn-sm text-rose btn-delete-notification" data-id="${item.id}" style="font-size:0.75rem;">删除</button>
+        <div class="notification-item-collapse hidden">
+          <div class="notification-item-body">${escapeHtml(item.content)}</div>
+          <div class="notification-item-actions">
+            ${isUnread ? `<button type="button" class="btn btn-ghost btn-sm btn-mark-one-read" data-id="${item.id}" style="font-size:0.75rem;">标为已读</button>` : ''}
+            <button type="button" class="btn btn-ghost btn-sm text-rose btn-delete-notification" data-id="${item.id}" style="font-size:0.75rem;">删除</button>
+          </div>
         </div>
       </div>
     `;
   }).join('');
 
-  // 标为已读
-  listContainer.querySelectorAll('.btn-mark-one-read').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const id = parseInt(btn.dataset.id, 10);
-      try {
-        await api('/api/notifications/read', {
-          method: 'POST',
-          body: JSON.stringify({ id }),
-        });
-        await fetchUnreadNotificationCount();
-        await loadNotifications();
-      } catch (err) {
-        // Handled in api()
-      }
-    });
-  });
+  // 绑定展开/折叠与就地操作事件
+  listContainer.querySelectorAll('.notification-item').forEach(itemEl => {
+    const header = itemEl.querySelector('.notification-item-header');
+    const collapse = itemEl.querySelector('.notification-item-collapse');
+    const id = parseInt(itemEl.dataset.id, 10);
 
-  // 删除单条
-  listContainer.querySelectorAll('.btn-delete-notification').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const id = parseInt(btn.dataset.id, 10);
-      try {
-        await api(`/api/notifications/${id}`, { method: 'DELETE' });
-        showToast('已删除该条通知', 'success');
-        await fetchUnreadNotificationCount();
-        await loadNotifications();
-      } catch (err) {
-        // Handled in api()
+    // 点击头部展开/收起通知详情
+    header.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+
+      const isOpen = itemEl.classList.contains('is-open');
+      if (isOpen) {
+        itemEl.classList.remove('is-open');
+        collapse.classList.add('hidden');
+      } else {
+        itemEl.classList.add('is-open');
+        collapse.classList.remove('hidden');
+
+        // 点开展开详情时，如果是未读状态，自动将其就地标记为已读
+        if (itemEl.classList.contains('unread')) {
+          markNotificationReadInPlace(id, itemEl);
+        }
       }
     });
+
+    // 标为已读按钮（就地更新，不重载列表）
+    const markBtn = itemEl.querySelector('.btn-mark-one-read');
+    if (markBtn) {
+      markBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        markNotificationReadInPlace(id, itemEl);
+      });
+    }
+
+    // 删除单条通知按钮（就地移除，不重载列表）
+    const deleteBtn = itemEl.querySelector('.btn-delete-notification');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteNotificationInPlace(id, itemEl);
+      });
+    }
   });
+}
+
+// 就地标记单条已读（不全部重载）
+async function markNotificationReadInPlace(id, itemEl) {
+  try {
+    const res = await api('/api/notifications/read', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    });
+
+    // 1. 更新本地 state
+    const notif = state.notifications.find(n => n.id === id);
+    if (notif) {
+      notif.is_read = true;
+    }
+
+    // 2. 局部刷新顶栏及徽标
+    if (res && res.unread_count !== undefined) {
+      updateUnreadBadges(res.unread_count);
+    } else {
+      await fetchUnreadNotificationCount();
+    }
+
+    // 3. 就地更新 DOM 状态
+    if (itemEl) {
+      itemEl.classList.remove('unread');
+      const dot = itemEl.querySelector('.notification-unread-dot');
+      if (dot) dot.remove();
+      const readBtn = itemEl.querySelector('.btn-mark-one-read');
+      if (readBtn) readBtn.remove();
+
+      // 如果当前是“仅看未读”过滤模式，平滑淡出并移除该项
+      if (elements.chkUnreadOnly && elements.chkUnreadOnly.checked) {
+        itemEl.classList.add('fade-out');
+        setTimeout(() => {
+          itemEl.remove();
+          checkNotificationEmptyState();
+        }, 200);
+      }
+    }
+  } catch (err) {
+    // 错误已由 api() 统一处理
+  }
+}
+
+// 就地删除单条通知（不全部重载）
+async function deleteNotificationInPlace(id, itemEl) {
+  try {
+    const res = await api(`/api/notifications/${id}`, { method: 'DELETE' });
+    showToast('已删除该条通知', 'success');
+
+    // 1. 本地内存列表移除
+    state.notifications = state.notifications.filter(n => n.id !== id);
+
+    // 2. 局部刷新顶栏徽标
+    if (res && res.unread_count !== undefined) {
+      updateUnreadBadges(res.unread_count);
+    } else {
+      await fetchUnreadNotificationCount();
+    }
+
+    // 3. 就地淡出并移除 DOM 节点
+    if (itemEl) {
+      itemEl.classList.add('fade-out');
+      setTimeout(() => {
+        itemEl.remove();
+        checkNotificationEmptyState();
+      }, 200);
+    }
+  } catch (err) {
+    // 错误已由 api() 统一处理
+  }
+}
+
+function checkNotificationEmptyState() {
+  const listContainer = elements.notificationListContainer;
+  const emptyState = elements.notificationEmptyState;
+  if (!listContainer || !emptyState) return;
+  if (!listContainer.children.length) {
+    emptyState.classList.remove('hidden');
+  } else {
+    emptyState.classList.add('hidden');
+  }
 }
 
 function initNotificationCenter() {

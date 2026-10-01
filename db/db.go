@@ -47,14 +47,19 @@ type Domain struct {
 	SSLStatus       string     `json:"ssl_status"` // "healthy", "warning", "critical", "expired", "error", "pending"
 	SSLError        string     `json:"ssl_error"`
 	DomainDaysLeft  int        `json:"domain_days_left"`
-	DomainExpiresAt *time.Time `json:"domain_expires_at"`
-	DomainStatus    string     `json:"domain_status"` // "healthy", "warning", "critical", "expired", "error", "skipped", "pending"
-	DomainError     string     `json:"domain_error"`
-	LastCheckedAt   *time.Time `json:"last_checked_at"`
-	IsPinned        bool       `json:"is_pinned"`
-	NotifyDisabled  bool       `json:"notify_disabled"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	DomainExpiresAt     *time.Time `json:"domain_expires_at"`
+	DomainStatus        string     `json:"domain_status"` // "healthy", "warning", "critical", "expired", "error", "skipped", "pending"
+	DomainError         string     `json:"domain_error"`
+	LastAlertSSLTier    int        `json:"last_alert_ssl_tier"`
+	LastAlertDomainTier int        `json:"last_alert_domain_tier"`
+	LastAlertSSLAt      *time.Time `json:"last_alert_ssl_at"`
+	LastAlertDomainAt   *time.Time `json:"last_alert_domain_at"`
+	LastCheckedAt       *time.Time `json:"last_checked_at"`
+	IsPinned            bool       `json:"is_pinned"`
+	NotifyDisabled      bool       `json:"notify_disabled"`
+	CronSpec            string     `json:"cron_spec"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 // DNSProviderAccount stores DNS API credentials
@@ -82,6 +87,7 @@ type DNSSyncConfig struct {
 	CheckDomain    bool       `json:"check_domain"`    // Whether imported domains check RDAP
 	DefaultPort    string     `json:"default_port"`    // Default 443
 	IsDisabled     bool       `json:"is_disabled"`     // Whether API mode is disabled
+	CronSpec       string     `json:"cron_spec"`       // Scheduled check cron or duration
 	LastSyncAt     *time.Time `json:"last_sync_at"`
 	LastSyncStatus string     `json:"last_sync_status"`
 	CreatedAt      time.Time  `json:"created_at"`
@@ -89,11 +95,12 @@ type DNSSyncConfig struct {
 }
 
 type Settings struct {
-	Interval           string   `json:"interval"`         // e.g. "12h"
-	ThresholdDays      int      `json:"threshold_days"`   // e.g. 15 (fallback)
-	AlertThresholds    string   `json:"alert_thresholds"` // e.g. "30,15,7,3"
-	Timeout            string   `json:"timeout"`          // e.g. "10s"
-	ShoutrrrURLs       []string `json:"shoutrrr_urls"`    // URLs list
+	Interval           string   `json:"interval"`           // e.g. "12h"
+	ThresholdDays      int      `json:"threshold_days"`     // e.g. 15 (fallback)
+	AlertThresholds    string   `json:"alert_thresholds"`   // e.g. "30,15,10,7,5,3,1"
+	AlertRuleMode      string   `json:"alert_rule_mode"`    // "tier_once" or "daily"
+	Timeout            string   `json:"timeout"`            // e.g. "10s"
+	ShoutrrrURLs       []string `json:"shoutrrr_urls"`      // URLs list
 	AppriseEnabled     bool     `json:"apprise_enabled"`
 	AppriseAPIURL      string   `json:"apprise_api_url"`
 	AppriseURLs        []string `json:"apprise_urls"`
@@ -177,9 +184,14 @@ func (d *DB) migrate() error {
 		domain_expires_at DATETIME,
 		domain_status TEXT NOT NULL DEFAULT 'pending',
 		domain_error TEXT NOT NULL DEFAULT '',
+		last_alert_ssl_tier INTEGER NOT NULL DEFAULT 0,
+		last_alert_domain_tier INTEGER NOT NULL DEFAULT 0,
+		last_alert_ssl_at DATETIME,
+		last_alert_domain_at DATETIME,
 		last_checked_at DATETIME,
 		is_pinned INTEGER NOT NULL DEFAULT 0,
 		notify_disabled INTEGER NOT NULL DEFAULT 0,
+		cron_spec TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
@@ -210,6 +222,7 @@ func (d *DB) migrate() error {
 		check_domain INTEGER NOT NULL DEFAULT 0,
 		default_port TEXT NOT NULL DEFAULT '443',
 		is_disabled INTEGER NOT NULL DEFAULT 0,
+		cron_spec TEXT NOT NULL DEFAULT '',
 		last_sync_at DATETIME,
 		last_sync_status TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
@@ -240,7 +253,13 @@ func (d *DB) migrate() error {
 	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN ssl_details TEXT NOT NULL DEFAULT ''")
 	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
 	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN notify_disabled INTEGER NOT NULL DEFAULT 0")
+	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN last_alert_ssl_tier INTEGER NOT NULL DEFAULT 0")
+	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN last_alert_domain_tier INTEGER NOT NULL DEFAULT 0")
+	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN last_alert_ssl_at DATETIME")
+	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN last_alert_domain_at DATETIME")
+	_, _ = d.db.Exec("ALTER TABLE domains ADD COLUMN cron_spec TEXT NOT NULL DEFAULT ''")
 	_, _ = d.db.Exec("ALTER TABLE dns_sync_configs ADD COLUMN is_disabled INTEGER NOT NULL DEFAULT 0")
+	_, _ = d.db.Exec("ALTER TABLE dns_sync_configs ADD COLUMN cron_spec TEXT NOT NULL DEFAULT ''")
 	_, _ = d.db.Exec("CREATE INDEX IF NOT EXISTS idx_dns_sync_configs_domain ON dns_sync_configs(domain)")
 	_, _ = d.db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC)")
 	_, _ = d.db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications(is_read)")
@@ -457,7 +476,8 @@ func (d *DB) GetAllDomains() ([]Domain, error) {
 		SELECT id, host, port, check_ssl, check_domain, multi_host, hosts_list, ssl_details,
 		       ssl_days_left, ssl_expires_at, ssl_issuer, ssl_status, ssl_error,
 		       domain_days_left, domain_expires_at, domain_status, domain_error,
-		       last_checked_at, is_pinned, notify_disabled, created_at, updated_at
+		       last_alert_ssl_tier, last_alert_domain_tier, last_alert_ssl_at, last_alert_domain_at,
+		       last_checked_at, is_pinned, notify_disabled, cron_spec, created_at, updated_at
 		FROM domains
 		ORDER BY id ASC
 	`)
@@ -474,7 +494,8 @@ func (d *DB) GetAllDomains() ([]Domain, error) {
 			&dom.ID, &dom.Host, &dom.Port, &checkSSLInt, &checkDomInt, &multiHostInt, &dom.HostsList, &dom.SSLDetails,
 			&dom.SSLDaysLeft, &dom.SSLExpiresAt, &dom.SSLIssuer, &dom.SSLStatus, &dom.SSLError,
 			&dom.DomainDaysLeft, &dom.DomainExpiresAt, &dom.DomainStatus, &dom.DomainError,
-			&dom.LastCheckedAt, &isPinnedInt, &notifyDisabledInt, &dom.CreatedAt, &dom.UpdatedAt,
+			&dom.LastAlertSSLTier, &dom.LastAlertDomainTier, &dom.LastAlertSSLAt, &dom.LastAlertDomainAt,
+			&dom.LastCheckedAt, &isPinnedInt, &notifyDisabledInt, &dom.CronSpec, &dom.CreatedAt, &dom.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -495,14 +516,16 @@ func (d *DB) GetDomainByID(id int64) (*Domain, error) {
 		SELECT id, host, port, check_ssl, check_domain, multi_host, hosts_list, ssl_details,
 		       ssl_days_left, ssl_expires_at, ssl_issuer, ssl_status, ssl_error,
 		       domain_days_left, domain_expires_at, domain_status, domain_error,
-		       last_checked_at, is_pinned, notify_disabled, created_at, updated_at
+		       last_alert_ssl_tier, last_alert_domain_tier, last_alert_ssl_at, last_alert_domain_at,
+		       last_checked_at, is_pinned, notify_disabled, cron_spec, created_at, updated_at
 		FROM domains
 		WHERE id = ?
 	`, id).Scan(
 		&dom.ID, &dom.Host, &dom.Port, &checkSSLInt, &checkDomInt, &multiHostInt, &dom.HostsList, &dom.SSLDetails,
 		&dom.SSLDaysLeft, &dom.SSLExpiresAt, &dom.SSLIssuer, &dom.SSLStatus, &dom.SSLError,
 		&dom.DomainDaysLeft, &dom.DomainExpiresAt, &dom.DomainStatus, &dom.DomainError,
-		&dom.LastCheckedAt, &isPinnedInt, &notifyDisabledInt, &dom.CreatedAt, &dom.UpdatedAt,
+		&dom.LastAlertSSLTier, &dom.LastAlertDomainTier, &dom.LastAlertSSLAt, &dom.LastAlertDomainAt,
+		&dom.LastCheckedAt, &isPinnedInt, &notifyDisabledInt, &dom.CronSpec, &dom.CreatedAt, &dom.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -515,7 +538,7 @@ func (d *DB) GetDomainByID(id int64) (*Domain, error) {
 	return &dom, nil
 }
 
-func (d *DB) AddDomain(host, port string, checkSSL, checkDomain, multiHost bool, hostsList string, isPinned, notifyDisabled bool) (*Domain, error) {
+func (d *DB) AddDomain(host, port string, checkSSL, checkDomain, multiHost bool, hostsList string, isPinned, notifyDisabled bool, cronSpec string) (*Domain, error) {
 	now := time.Now().UTC()
 	checkSSLInt := 0
 	if checkSSL {
@@ -542,9 +565,9 @@ func (d *DB) AddDomain(host, port string, checkSSL, checkDomain, multiHost bool,
 	}
 
 	res, err := d.db.Exec(`
-		INSERT INTO domains (host, port, check_ssl, check_domain, multi_host, hosts_list, is_pinned, notify_disabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, host, port, checkSSLInt, checkDomInt, multiHostInt, hostsList, isPinnedInt, notifyDisabledInt, now, now)
+		INSERT INTO domains (host, port, check_ssl, check_domain, multi_host, hosts_list, is_pinned, notify_disabled, cron_spec, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, host, port, checkSSLInt, checkDomInt, multiHostInt, hostsList, isPinnedInt, notifyDisabledInt, strings.TrimSpace(cronSpec), now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -557,7 +580,7 @@ func (d *DB) AddDomain(host, port string, checkSSL, checkDomain, multiHost bool,
 	return d.GetDomainByID(id)
 }
 
-func (d *DB) UpdateDomain(id int64, host, port string, checkSSL, checkDomain, multiHost bool, hostsList string, isPinned, notifyDisabled bool) error {
+func (d *DB) UpdateDomain(id int64, host, port string, checkSSL, checkDomain, multiHost bool, hostsList string, isPinned, notifyDisabled bool, cronSpec string) error {
 	now := time.Now().UTC()
 	checkSSLInt := 0
 	if checkSSL {
@@ -584,10 +607,10 @@ func (d *DB) UpdateDomain(id int64, host, port string, checkSSL, checkDomain, mu
 	}
 
 	_, err := d.db.Exec(`
-		UPDATE domains 
-		SET host = ?, port = ?, check_ssl = ?, check_domain = ?, multi_host = ?, hosts_list = ?, is_pinned = ?, notify_disabled = ?, updated_at = ?
+		UPDATE domains
+		SET host = ?, port = ?, check_ssl = ?, check_domain = ?, multi_host = ?, hosts_list = ?, is_pinned = ?, notify_disabled = ?, cron_spec = ?, updated_at = ?
 		WHERE id = ?
-	`, host, port, checkSSLInt, checkDomInt, multiHostInt, hostsList, isPinnedInt, notifyDisabledInt, now, id)
+	`, host, port, checkSSLInt, checkDomInt, multiHostInt, hostsList, isPinnedInt, notifyDisabledInt, strings.TrimSpace(cronSpec), now, id)
 	return err
 }
 
@@ -640,6 +663,28 @@ func (d *DB) UpdateDomainCheckResult(
 	return err
 }
 
+func (d *DB) UpdateDomainAlertState(id int64, lastAlertSSLTier, lastAlertDomainTier int, lastAlertSSLAt, lastAlertDomainAt *time.Time) error {
+	now := time.Now().UTC()
+	_, err := d.db.Exec(`
+		UPDATE domains
+		SET last_alert_ssl_tier = ?, last_alert_domain_tier = ?,
+		    last_alert_ssl_at = ?, last_alert_domain_at = ?,
+		    updated_at = ?
+		WHERE id = ?
+	`, lastAlertSSLTier, lastAlertDomainTier, lastAlertSSLAt, lastAlertDomainAt, now, id)
+	return err
+}
+
+func (d *DB) ResetDomainAlertSSLTier(id int64) error {
+	_, err := d.db.Exec(`UPDATE domains SET last_alert_ssl_tier = 0 WHERE id = ?`, id)
+	return err
+}
+
+func (d *DB) ResetDomainAlertDomainTier(id int64) error {
+	_, err := d.db.Exec(`UPDATE domains SET last_alert_domain_tier = 0 WHERE id = ?`, id)
+	return err
+}
+
 // Settings operations
 
 func (d *DB) GetSetting(key, defaultVal string) string {
@@ -661,16 +706,17 @@ func (d *DB) SetSetting(key, val string) error {
 
 func (d *DB) EnsureDefaultSettings() {
 	defaults := map[string]string{
-		"interval":             "12h",
-		"threshold_days":       "15",
-		"alert_thresholds":     "30,15,7,3",
-		"timeout":              "10s",
-		"shoutrrr_urls":        "[]",
-		"apprise_enabled":      "false",
-		"apprise_api_url":      "http://apprise:8000/notify",
-		"apprise_urls":         "[]",
-		"turnstile_enabled":            "false",
-		"turnstile_site_key":           "",
+		"interval":                    "12h",
+		"threshold_days":              "15",
+		"alert_thresholds":            "30,15,10,7,5,3,1",
+		"alert_rule_mode":             "tier_once",
+		"timeout":                     "10s",
+		"shoutrrr_urls":               "[]",
+		"apprise_enabled":             "false",
+		"apprise_api_url":             "http://apprise:8000/notify",
+		"apprise_urls":                "[]",
+		"turnstile_enabled":           "false",
+		"turnstile_site_key":          "",
 		"turnstile_secret_key":         "",
 		"notification_mode":           "realtime",
 		"notification_batch_interval": "1h",
@@ -711,6 +757,7 @@ type DomainImportItem struct {
 	HostsList      string `json:"hosts_list,omitempty"`
 	IsPinned       bool   `json:"is_pinned,omitempty"`
 	NotifyDisabled bool   `json:"notify_disabled,omitempty"`
+	CronSpec       string `json:"cron_spec,omitempty"`
 }
 
 type BatchImportResult struct {
@@ -737,8 +784,8 @@ func (d *DB) BatchAddDomains(items []DomainImportItem) (*BatchImportResult, erro
 	defer checkStmt.Close()
 
 	insertStmt, err := tx.Prepare(`
-		INSERT INTO domains (host, port, check_ssl, check_domain, multi_host, hosts_list, is_pinned, notify_disabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO domains (host, port, check_ssl, check_domain, multi_host, hosts_list, is_pinned, notify_disabled, cron_spec, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return nil, err
@@ -782,7 +829,7 @@ func (d *DB) BatchAddDomains(items []DomainImportItem) (*BatchImportResult, erro
 			continue
 		}
 
-		execRes, err := insertStmt.Exec(host, port, checkSSLInt, checkDomInt, multiHostInt, item.HostsList, isPinnedInt, notifyDisabledInt, now, now)
+		execRes, err := insertStmt.Exec(host, port, checkSSLInt, checkDomInt, multiHostInt, item.HostsList, isPinnedInt, notifyDisabledInt, strings.TrimSpace(item.CronSpec), now, now)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				res.Skipped++
@@ -862,7 +909,7 @@ func (d *DB) DeleteDNSProvider(id int64) error {
 
 func (d *DB) ListDNSSyncConfigs() ([]DNSSyncConfig, error) {
 	query := `
-		SELECT c.id, c.provider_id, p.provider_type, p.name, c.domain, c.zone_id, c.blacklist, c.auto_sync, c.check_domain, c.default_port, c.is_disabled, c.last_sync_at, c.last_sync_status, c.created_at, c.updated_at
+		SELECT c.id, c.provider_id, p.provider_type, p.name, c.domain, c.zone_id, c.blacklist, c.auto_sync, c.check_domain, c.default_port, c.is_disabled, c.cron_spec, c.last_sync_at, c.last_sync_status, c.created_at, c.updated_at
 		FROM dns_sync_configs c
 		LEFT JOIN dns_providers p ON c.provider_id = p.id
 		ORDER BY c.domain ASC`
@@ -881,7 +928,7 @@ func (d *DB) ListDNSSyncConfigs() ([]DNSSyncConfig, error) {
 		var autoSyncInt, checkDomInt, isDisabledInt int
 		var lastSyncAt sql.NullTime
 
-		if err := rows.Scan(&item.ID, &item.ProviderID, &pType, &pName, &item.Domain, &item.ZoneID, &blacklistJSON, &autoSyncInt, &checkDomInt, &item.DefaultPort, &isDisabledInt, &lastSyncAt, &item.LastSyncStatus, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProviderID, &pType, &pName, &item.Domain, &item.ZoneID, &blacklistJSON, &autoSyncInt, &checkDomInt, &item.DefaultPort, &isDisabledInt, &item.CronSpec, &lastSyncAt, &item.LastSyncStatus, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 
@@ -906,7 +953,7 @@ func (d *DB) ListDNSSyncConfigs() ([]DNSSyncConfig, error) {
 
 func (d *DB) GetDNSSyncConfigByID(id int64) (*DNSSyncConfig, error) {
 	query := `
-		SELECT c.id, c.provider_id, p.provider_type, p.name, c.domain, c.zone_id, c.blacklist, c.auto_sync, c.check_domain, c.default_port, c.is_disabled, c.last_sync_at, c.last_sync_status, c.created_at, c.updated_at
+		SELECT c.id, c.provider_id, p.provider_type, p.name, c.domain, c.zone_id, c.blacklist, c.auto_sync, c.check_domain, c.default_port, c.is_disabled, c.cron_spec, c.last_sync_at, c.last_sync_status, c.created_at, c.updated_at
 		FROM dns_sync_configs c
 		LEFT JOIN dns_providers p ON c.provider_id = p.id
 		WHERE c.id = ?`
@@ -918,7 +965,7 @@ func (d *DB) GetDNSSyncConfigByID(id int64) (*DNSSyncConfig, error) {
 	var lastSyncAt sql.NullTime
 
 	err := d.db.QueryRow(query, id).Scan(
-		&item.ID, &item.ProviderID, &pType, &pName, &item.Domain, &item.ZoneID, &blacklistJSON, &autoSyncInt, &checkDomInt, &item.DefaultPort, &isDisabledInt, &lastSyncAt, &item.LastSyncStatus, &item.CreatedAt, &item.UpdatedAt,
+		&item.ID, &item.ProviderID, &pType, &pName, &item.Domain, &item.ZoneID, &blacklistJSON, &autoSyncInt, &checkDomInt, &item.DefaultPort, &isDisabledInt, &item.CronSpec, &lastSyncAt, &item.LastSyncStatus, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -943,7 +990,7 @@ func (d *DB) GetDNSSyncConfigByID(id int64) (*DNSSyncConfig, error) {
 
 func (d *DB) GetDNSSyncConfigByDomain(domain string) (*DNSSyncConfig, error) {
 	query := `
-		SELECT c.id, c.provider_id, p.provider_type, p.name, c.domain, c.zone_id, c.blacklist, c.auto_sync, c.check_domain, c.default_port, c.is_disabled, c.last_sync_at, c.last_sync_status, c.created_at, c.updated_at
+		SELECT c.id, c.provider_id, p.provider_type, p.name, c.domain, c.zone_id, c.blacklist, c.auto_sync, c.check_domain, c.default_port, c.is_disabled, c.cron_spec, c.last_sync_at, c.last_sync_status, c.created_at, c.updated_at
 		FROM dns_sync_configs c
 		LEFT JOIN dns_providers p ON c.provider_id = p.id
 		WHERE LOWER(c.domain) = LOWER(?) LIMIT 1`
@@ -955,7 +1002,7 @@ func (d *DB) GetDNSSyncConfigByDomain(domain string) (*DNSSyncConfig, error) {
 	var lastSyncAt sql.NullTime
 
 	err := d.db.QueryRow(query, strings.TrimSpace(domain)).Scan(
-		&item.ID, &item.ProviderID, &pType, &pName, &item.Domain, &item.ZoneID, &blacklistJSON, &autoSyncInt, &checkDomInt, &item.DefaultPort, &isDisabledInt, &lastSyncAt, &item.LastSyncStatus, &item.CreatedAt, &item.UpdatedAt,
+		&item.ID, &item.ProviderID, &pType, &pName, &item.Domain, &item.ZoneID, &blacklistJSON, &autoSyncInt, &checkDomInt, &item.DefaultPort, &isDisabledInt, &item.CronSpec, &lastSyncAt, &item.LastSyncStatus, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -1013,9 +1060,9 @@ func (d *DB) SaveDNSSyncConfig(c *DNSSyncConfig) error {
 
 	if c.ID == 0 {
 		res, err := d.db.Exec(`
-			INSERT INTO dns_sync_configs (provider_id, domain, zone_id, blacklist, auto_sync, check_domain, default_port, is_disabled, last_sync_status, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			c.ProviderID, normDom, c.ZoneID, string(bBytes), autoSyncInt, checkDomInt, c.DefaultPort, isDisabledInt, c.LastSyncStatus, now, now)
+			INSERT INTO dns_sync_configs (provider_id, domain, zone_id, blacklist, auto_sync, check_domain, default_port, is_disabled, cron_spec, last_sync_status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			c.ProviderID, normDom, c.ZoneID, string(bBytes), autoSyncInt, checkDomInt, c.DefaultPort, isDisabledInt, strings.TrimSpace(c.CronSpec), c.LastSyncStatus, now, now)
 		if err != nil {
 			return err
 		}
@@ -1027,10 +1074,34 @@ func (d *DB) SaveDNSSyncConfig(c *DNSSyncConfig) error {
 
 	_, err := d.db.Exec(`
 		UPDATE dns_sync_configs
-		SET provider_id = ?, domain = ?, zone_id = ?, blacklist = ?, auto_sync = ?, check_domain = ?, default_port = ?, is_disabled = ?, updated_at = ?
+		SET provider_id = ?, domain = ?, zone_id = ?, blacklist = ?, auto_sync = ?, check_domain = ?, default_port = ?, is_disabled = ?, cron_spec = ?, updated_at = ?
 		WHERE id = ?`,
-		c.ProviderID, normDom, c.ZoneID, string(bBytes), autoSyncInt, checkDomInt, c.DefaultPort, isDisabledInt, now, c.ID)
+		c.ProviderID, normDom, c.ZoneID, string(bBytes), autoSyncInt, checkDomInt, c.DefaultPort, isDisabledInt, strings.TrimSpace(c.CronSpec), now, c.ID)
 	c.UpdatedAt = now
+	return err
+}
+
+func (d *DB) SetApexCronSpec(domain, cronSpec string) error {
+	normDom := strings.TrimRight(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if normDom == "" {
+		return fmt.Errorf("domain cannot be empty")
+	}
+	cronSpec = strings.TrimSpace(cronSpec)
+	now := time.Now().UTC()
+
+	var existingID int64
+	err := d.db.QueryRow(`SELECT id FROM dns_sync_configs WHERE LOWER(domain) = LOWER(?)`, normDom).Scan(&existingID)
+	if err == sql.ErrNoRows {
+		_, err = d.db.Exec(`
+			INSERT INTO dns_sync_configs (provider_id, domain, zone_id, blacklist, auto_sync, check_domain, default_port, is_disabled, cron_spec, last_sync_status, created_at, updated_at)
+			VALUES (0, ?, '', '[]', 0, 1, '443', 0, ?, '', ?, ?)`,
+			normDom, cronSpec, now, now)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	_, err = d.db.Exec(`UPDATE dns_sync_configs SET cron_spec = ?, updated_at = ? WHERE id = ?`, cronSpec, now, existingID)
 	return err
 }
 

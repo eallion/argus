@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +22,7 @@ import (
 	"argus/checker"
 	"argus/db"
 	"argus/notifier"
+	"argus/schedule"
 	"argus/server"
 )
 
@@ -111,8 +114,138 @@ func main() {
 		return alertAggregator.Count()
 	}
 
-	// 统一告警信息解析辅助函数
-	extractTargetAlert := func(updated *db.Domain) (worstLevel string, messages []string) {
+	// 阶梯解析与匹配工具函数
+	parseAlertThresholds := func(raw string) []int {
+		parts := strings.Split(raw, ",")
+		seen := make(map[int]bool)
+		var list []int
+		for _, p := range parts {
+			val, err := strconv.Atoi(strings.TrimSpace(p))
+			if err == nil && val > 0 && !seen[val] {
+				seen[val] = true
+				list = append(list, val)
+			}
+		}
+		sort.Slice(list, func(i, j int) bool {
+			return list[i] > list[j]
+		})
+		if len(list) == 0 {
+			return []int{30, 15, 10, 7, 5, 3, 1}
+		}
+		return list
+	}
+
+	// 匹配所处的阶梯档位：返回 <= 阶梯中最小的阈值，例如 [30, 15, 10, 7, 5, 3, 1]
+	// daysLeft=25 -> 30, daysLeft=15 -> 15, daysLeft=12 -> 15, daysLeft=6 -> 7
+	// daysLeft > 30 -> 0 (正常/健康), daysLeft <= 0 -> -1 (已过期)
+	matchAlertTier := func(daysLeft int, tiers []int) int {
+		if len(tiers) == 0 {
+			return 0
+		}
+		if daysLeft <= 0 {
+			return -1
+		}
+		matched := 0
+		for _, t := range tiers {
+			if daysLeft <= t {
+				matched = t
+			}
+		}
+		return matched
+	}
+
+	// 单项检测（SSL 或 RDAP）告警决策引擎
+	evaluateTargetAlert := func(
+		status string,
+		daysLeft int,
+		lastTier int,
+		lastAlertAt *time.Time,
+		ruleMode string,
+		tiers []int,
+		now time.Time,
+	) (shouldNotify bool, newTier int, newAlertAt *time.Time, tierLabel string) {
+		// 1. 正常健康或跳过检测：重置 tier 为 0，不发通知
+		if status == "healthy" || status == "skipped" {
+			return false, 0, nil, ""
+		}
+
+		// 2. 检测错误：网络异常或 SNI 不符等
+		if status == "error" {
+			if ruleMode == "daily" {
+				if lastAlertAt == nil || now.Sub(*lastAlertAt) >= 20*time.Hour || now.Format("2006-01-02") != lastAlertAt.Format("2006-01-02") {
+					return true, -99, &now, "检测失败"
+				}
+				return false, -99, lastAlertAt, ""
+			}
+			// tier_once 模式：仅在首次发生错误时通知一次
+			if lastTier != -99 {
+				return true, -99, &now, "检测失败"
+			}
+			return false, -99, lastAlertAt, ""
+		}
+
+		// 3. 证书或域名已过期
+		if status == "expired" || daysLeft <= 0 {
+			if ruleMode == "daily" {
+				if lastAlertAt == nil || now.Sub(*lastAlertAt) >= 20*time.Hour || now.Format("2006-01-02") != lastAlertAt.Format("2006-01-02") {
+					return true, -1, &now, "已失效过期"
+				}
+				return false, -1, lastAlertAt, ""
+			}
+			// tier_once 模式：仅在跨入过期时通知一次
+			if lastTier != -1 {
+				return true, -1, &now, "已失效过期"
+			}
+			return false, -1, lastAlertAt, ""
+		}
+
+		// 4. 临期阶梯判断
+		currTier := matchAlertTier(daysLeft, tiers)
+		if currTier == 0 {
+			// 天数已超出最大阶梯天数（例如已续期为 90 天），静默重置档位为 0，不通知
+			return false, 0, nil, ""
+		}
+
+		if currTier <= 3 {
+			tierLabel = fmt.Sprintf("红色紧急告警 (<=%d天)", currTier)
+		} else if currTier <= 7 {
+			tierLabel = fmt.Sprintf("橙色警告 (<=%d天)", currTier)
+		} else {
+			tierLabel = fmt.Sprintf("%d天临期提醒", currTier)
+		}
+
+		// 证书续期更新检测：若当前档位大于上一次记录的档位（说明天数变大/证书在两档中间续期了）
+		if lastTier > 0 && currTier > lastTier {
+			// 证书已完成更新续期，静默重置当前档位，不触发到期通知
+			return false, currTier, lastAlertAt, ""
+		}
+
+		// 模式 1: 按阶梯单次通知 (tier_once)
+		// 第一档通知一次，第二档再通知一次，中间天数不通知
+		if ruleMode != "daily" {
+			if lastTier == 0 || currTier < lastTier {
+				return true, currTier, &now, tierLabel
+			}
+			// 处于同一档位内（如 30 天通知后，29、28 天），跳过通知
+			return false, currTier, lastAlertAt, ""
+		}
+
+		// 模式 2: 每天通知 (daily)
+		// 只要处于设定的阶梯天数内，每天巡检均发送一次通知
+		if lastAlertAt == nil || now.Sub(*lastAlertAt) >= 20*time.Hour || now.Format("2006-01-02") != lastAlertAt.Format("2006-01-02") {
+			return true, currTier, &now, tierLabel
+		}
+		return false, currTier, lastAlertAt, ""
+	}
+
+	// 统一告警信息提取函数
+	extractTargetAlertMessages := func(
+		updated *db.Domain,
+		includeSSL bool,
+		sslLabel string,
+		includeDomain bool,
+		domainLabel string,
+	) (worstLevel string, messages []string) {
 		levelWeight := map[string]int{
 			"expired":  100,
 			"critical": 90,
@@ -123,7 +256,6 @@ func main() {
 			"healthy":  10,
 		}
 		currentWeight := 0
-
 		updateLevel := func(lvl string) {
 			w := levelWeight[lvl]
 			if w > currentWeight {
@@ -136,7 +268,7 @@ func main() {
 			}
 		}
 
-		if updated.CheckSSL {
+		if includeSSL && updated.CheckSSL {
 			if updated.MultiHost && updated.SSLDetails != "" {
 				var nodes []checker.NodeResult
 				_ = json.Unmarshal([]byte(updated.SSLDetails), &nodes)
@@ -155,102 +287,51 @@ func main() {
 							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 检测失败: %s", label, n.Error))
 						} else if n.Status == "expired" {
 							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 严重过期: 证书已失效！", label))
-						} else if n.Status == "critical" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 红色紧急告警: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
-								label, n.DaysLeft, expStr, n.Issuer))
-						} else if n.Status == "warning" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 橙色警告: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
-								label, n.DaysLeft, expStr, n.Issuer))
-						} else if n.Status == "notice" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 15天临期提醒: 剩余 %d 天 (到期: %s, 颁发者: %s)",
-								label, n.DaysLeft, expStr, n.Issuer))
-						} else if n.Status == "info" {
-							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] 30天到期提醒: 剩余 %d 天 (到期: %s, 颁发者: %s)",
-								label, n.DaysLeft, expStr, n.Issuer))
+						} else {
+							messages = append(messages, fmt.Sprintf("- SSL 节点 [%s] %s: 剩余 %d 天 (到期: %s, 颁发者: %s)",
+								label, sslLabel, n.DaysLeft, expStr, n.Issuer))
 						}
 					}
 				}
 			} else {
 				if updated.SSLStatus != "healthy" && updated.SSLStatus != "skipped" {
 					updateLevel(updated.SSLStatus)
+					expStr := ""
+					if updated.SSLExpiresAt != nil {
+						expStr = updated.SSLExpiresAt.Format("2006-01-02")
+					}
 					if updated.SSLStatus == "error" {
 						messages = append(messages, fmt.Sprintf("- SSL 证书 [检测失败]: %s", updated.SSLError))
 					} else if updated.SSLStatus == "expired" {
 						messages = append(messages, "- SSL 证书 [严重过期]: 证书已失效！")
-					} else if updated.SSLStatus == "critical" {
-						expStr := ""
-						if updated.SSLExpiresAt != nil {
-							expStr = updated.SSLExpiresAt.Format("2006-01-02")
-						}
-						messages = append(messages, fmt.Sprintf("- SSL 证书 [红色紧急告警]: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
-							updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-					} else if updated.SSLStatus == "warning" {
-						expStr := ""
-						if updated.SSLExpiresAt != nil {
-							expStr = updated.SSLExpiresAt.Format("2006-01-02")
-						}
-						messages = append(messages, fmt.Sprintf("- SSL 证书 [橙色警告]: 仅剩 %d 天 (到期: %s, 颁发者: %s)",
-							updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-					} else if updated.SSLStatus == "notice" {
-						expStr := ""
-						if updated.SSLExpiresAt != nil {
-							expStr = updated.SSLExpiresAt.Format("2006-01-02")
-						}
-						messages = append(messages, fmt.Sprintf("- SSL 证书 [15天临期提醒]: 剩余 %d 天 (到期: %s, 颁发者: %s)",
-							updated.SSLDaysLeft, expStr, updated.SSLIssuer))
-					} else if updated.SSLStatus == "info" {
-						expStr := ""
-						if updated.SSLExpiresAt != nil {
-							expStr = updated.SSLExpiresAt.Format("2006-01-02")
-						}
-						messages = append(messages, fmt.Sprintf("- SSL 证书 [30天到期提醒]: 剩余 %d 天 (到期: %s, 颁发者: %s)",
-							updated.SSLDaysLeft, expStr, updated.SSLIssuer))
+					} else {
+						messages = append(messages, fmt.Sprintf("- SSL 证书 [%s]: 剩余 %d 天 (到期: %s, 颁发者: %s)",
+							sslLabel, updated.SSLDaysLeft, expStr, updated.SSLIssuer))
 					}
 				}
 			}
 		}
 
-		if updated.CheckDomain {
+		if includeDomain && updated.CheckDomain {
 			if updated.DomainStatus != "healthy" && updated.DomainStatus != "skipped" {
 				updateLevel(updated.DomainStatus)
+				expStr := ""
+				if updated.DomainExpiresAt != nil {
+					expStr = updated.DomainExpiresAt.Format("2006-01-02")
+				}
 				if updated.DomainStatus == "error" {
 					messages = append(messages, fmt.Sprintf("- 域名注册 [RDAP查询失败]: %s", updated.DomainError))
 				} else if updated.DomainStatus == "expired" {
 					messages = append(messages, "- 域名注册 [已超过注册期]: 域名已过期！")
-				} else if updated.DomainStatus == "critical" {
-					expStr := ""
-					if updated.DomainExpiresAt != nil {
-						expStr = updated.DomainExpiresAt.Format("2006-01-02")
-					}
-					messages = append(messages, fmt.Sprintf("- 域名注册 [红色紧急告警]: 仅剩 %d 天 (到期: %s)",
-						updated.DomainDaysLeft, expStr))
-				} else if updated.DomainStatus == "warning" {
-					expStr := ""
-					if updated.DomainExpiresAt != nil {
-						expStr = updated.DomainExpiresAt.Format("2006-01-02")
-					}
-					messages = append(messages, fmt.Sprintf("- 域名注册 [橙色警告]: 仅剩 %d 天 (到期: %s)",
-						updated.DomainDaysLeft, expStr))
-				} else if updated.DomainStatus == "notice" {
-					expStr := ""
-					if updated.DomainExpiresAt != nil {
-						expStr = updated.DomainExpiresAt.Format("2006-01-02")
-					}
-					messages = append(messages, fmt.Sprintf("- 域名注册 [15天临期提醒]: 剩余 %d 天 (到期: %s)",
-						updated.DomainDaysLeft, expStr))
-				} else if updated.DomainStatus == "info" {
-					expStr := ""
-					if updated.DomainExpiresAt != nil {
-						expStr = updated.DomainExpiresAt.Format("2006-01-02")
-					}
-					messages = append(messages, fmt.Sprintf("- 域名注册 [30天到期提醒]: 剩余 %d 天 (到期: %s)",
-						updated.DomainDaysLeft, expStr))
+				} else {
+					messages = append(messages, fmt.Sprintf("- 域名注册 [%s]: 剩余 %d 天 (到期: %s)",
+						domainLabel, updated.DomainDaysLeft, expStr))
 				}
 			}
 		}
 
 		if worstLevel == "" {
-			worstLevel = "info"
+			worstLevel = "warning"
 		}
 		return worstLevel, messages
 	}
@@ -288,6 +369,78 @@ func main() {
 		}
 	}
 
+	// 目标巡检后的告警决策与分发流水线
+	processDomainAlert := func(updated *db.Domain) {
+		ruleMode := database.GetSetting("alert_rule_mode", "tier_once")
+		tiersStr := database.GetSetting("alert_thresholds", "30,15,10,7,5,3,1")
+		tiers := parseAlertThresholds(tiersStr)
+		now := time.Now().UTC()
+
+		shouldNotifySSL := false
+		newSSLTier := updated.LastAlertSSLTier
+		newSSLAt := updated.LastAlertSSLAt
+		var sslTierLabel string
+
+		if updated.CheckSSL {
+			shouldNotifySSL, newSSLTier, newSSLAt, sslTierLabel = evaluateTargetAlert(
+				updated.SSLStatus,
+				updated.SSLDaysLeft,
+				updated.LastAlertSSLTier,
+				updated.LastAlertSSLAt,
+				ruleMode,
+				tiers,
+				now,
+			)
+		} else {
+			newSSLTier = 0
+			newSSLAt = nil
+		}
+
+		shouldNotifyDomain := false
+		newDomainTier := updated.LastAlertDomainTier
+		newDomainAt := updated.LastAlertDomainAt
+		var domainTierLabel string
+
+		if updated.CheckDomain {
+			shouldNotifyDomain, newDomainTier, newDomainAt, domainTierLabel = evaluateTargetAlert(
+				updated.DomainStatus,
+				updated.DomainDaysLeft,
+				updated.LastAlertDomainTier,
+				updated.LastAlertDomainAt,
+				ruleMode,
+				tiers,
+				now,
+			)
+		} else {
+			newDomainTier = 0
+			newDomainAt = nil
+		}
+
+		// 检查状态是否有变更（包括证书更新续期重置为 0，或跨入新阶梯），持久化至数据库
+		stateChanged := (newSSLTier != updated.LastAlertSSLTier) ||
+			(newDomainTier != updated.LastAlertDomainTier) ||
+			(shouldNotifySSL && newSSLAt != updated.LastAlertSSLAt) ||
+			(shouldNotifyDomain && newDomainAt != updated.LastAlertDomainAt)
+
+		if stateChanged {
+			_ = database.UpdateDomainAlertState(updated.ID, newSSLTier, newDomainTier, newSSLAt, newDomainAt)
+			updated.LastAlertSSLTier = newSSLTier
+			updated.LastAlertDomainTier = newDomainTier
+			updated.LastAlertSSLAt = newSSLAt
+			updated.LastAlertDomainAt = newDomainAt
+		}
+
+		// 仅当存在需要通知的项目时，提取消息并分发
+		if !shouldNotifySSL && !shouldNotifyDomain {
+			return
+		}
+
+		level, messages := extractTargetAlertMessages(updated, shouldNotifySSL, sslTierLabel, shouldNotifyDomain, domainTierLabel)
+		if len(messages) > 0 {
+			dispatchTargetAlert(updated, level, messages)
+		}
+	}
+
 	// Single domain check logic with 30/15/7/3 tier support
 	checkSingleDomain := func(dom *db.Domain) (*db.Domain, error) {
 		timeoutStr := database.GetSetting("timeout", "10s")
@@ -308,6 +461,12 @@ func main() {
 		sslDaysLeft := 0
 		sslIssuer := ""
 		sslDetails := ""
+
+		tiersList := parseAlertThresholds(database.GetSetting("alert_thresholds", "30,15,10,7,5,3,1"))
+		maxTier := 30
+		if len(tiersList) > 0 {
+			maxTier = tiersList[0]
+		}
 
 		if dom.CheckSSL {
 			sslStatus = "healthy"
@@ -354,7 +513,7 @@ func main() {
 						nr.Status = "warning"
 					} else if nRes.DaysLeft <= 15 {
 						nr.Status = "notice"
-					} else if nRes.DaysLeft <= 30 {
+					} else if nRes.DaysLeft <= maxTier {
 						nr.Status = "info"
 					} else {
 						nr.Status = "healthy"
@@ -421,10 +580,10 @@ func main() {
 					sslStatus = "warning" // 橙色警告 (<= 7 天)
 				} else if sslRes.DaysLeft <= 15 {
 					sslStatus = "notice" // 黄色注意 (<= 15 天)
-				} else if sslRes.DaysLeft <= 30 {
-					sslStatus = "info" // 临期关注 (<= 30 天)
+				} else if sslRes.DaysLeft <= maxTier {
+					sslStatus = "info" // 临期关注 (<= maxTier 天)
 				} else {
-					sslStatus = "healthy" // 正常 (> 30 天)
+					sslStatus = "healthy" // 正常 (> maxTier 天)
 				}
 			}
 		}
@@ -452,7 +611,7 @@ func main() {
 					domainStatus = "warning"
 				} else if dRes.DaysLeft <= 15 {
 					domainStatus = "notice"
-				} else if dRes.DaysLeft <= 30 {
+				} else if dRes.DaysLeft <= maxTier {
 					domainStatus = "info"
 				} else {
 					domainStatus = "healthy"
@@ -522,10 +681,7 @@ func main() {
 					return
 				}
 
-				level, messages := extractTargetAlert(updated)
-				if len(messages) > 0 {
-					dispatchTargetAlert(updated, level, messages)
-				}
+				processDomainAlert(updated)
 			}(item)
 		}
 
@@ -605,20 +761,27 @@ func main() {
 			return
 		}
 
-		level, messages := extractTargetAlert(updated)
-		if len(messages) > 0 {
-			dispatchTargetAlert(updated, level, messages)
-		}
+		processDomainAlert(updated)
 	}
 
-	// Background per-target staggered scheduler: 每个监控目标用不同的起始时间，按统一间隔独立检测
+	// Background multi-tier scheduler:
+	// 1. Apex Domain Scheduled Tasks (先从 DNS 同步一次新子域名，再发起全量巡检)
+	// 2. Individual Subdomain Scheduled Tasks (独立 cron/自然语言周期)
+	// 3. Fallback: 默认随机一个时间（错峰哈希散列）配合系统设置的统一间隔
 	go func() {
 		bootTime := time.Now()
-		nextCheckMap := make(map[int64]time.Time)
-		var mapMu sync.Mutex
+
+		type scheduleEntry struct {
+			spec          string
+			scheduledTime time.Time
+		}
+
+		apexNextCheckMap := make(map[string]scheduleEntry) // apex -> entry
+		subNextCheckMap := make(map[int64]scheduleEntry)   // domainID -> entry
+		var schedMu sync.Mutex
 		lastDNSSyncTime := time.Now()
 
-		log.Printf("[Argus] 独立错峰调度器已就绪：每个监控目标将具有不同的起始时间，按统一间隔独立检测")
+		log.Printf("[Argus] 多层级任务调度器已就绪：支持主域名/子域名自定义计划，无独立计划目标自动随机打散错峰巡检")
 
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -630,60 +793,160 @@ func main() {
 				interval = 12 * time.Hour
 			}
 
-			// 定时同步 DNS API（每小时）
+			// 定时同步 DNS API 保底（每小时）
 			if time.Since(lastDNSSyncTime) >= 1*time.Hour {
 				lastDNSSyncTime = time.Now()
 				go srv.SyncAllAutoDNSTasks()
 			}
 
-			domains, err := database.GetAllDomains()
-			if err != nil || len(domains) == 0 {
-				continue
+			// 获取所有主域名配置
+			dnsConfigs, _ := database.ListDNSSyncConfigs()
+			apexCronMap := make(map[string]string)
+			activeApex := make(map[string]bool)
+			for _, c := range dnsConfigs {
+				normApex := strings.TrimRight(strings.ToLower(strings.TrimSpace(c.Domain)), ".")
+				if normApex == "" {
+					continue
+				}
+				if c.CronSpec != "" {
+					apexCronMap[normApex] = c.CronSpec
+					activeApex[normApex] = true
+				}
 			}
 
 			now := time.Now()
-			currentIDs := make(map[int64]bool)
 
-			mapMu.Lock()
-			for _, d := range domains {
-				currentIDs[d.ID] = true
-				scheduledTime, exists := nextCheckMap[d.ID]
-				if !exists {
-					// 每一个监控目标计算唯一稳定哈希偏移，打散起始时间在 [30s, interval] 之间
-					var minWait time.Duration = 30 * time.Second
-					if interval > 2*time.Minute {
-						randRange := interval - minWait
-						offset := minWait + time.Duration(hashHost(d.Host)%uint64(randRange))
-						scheduledTime = bootTime.Add(offset)
+			schedMu.Lock()
+
+			// 1. 调度配置了 CronSpec 的主域名
+			for apex, spec := range apexCronMap {
+				entry, exists := apexNextCheckMap[apex]
+				if !exists || entry.spec != spec {
+					// 重新排期
+					nextTime, err := schedule.NextExecutionTime(spec, now)
+					if err != nil {
+						log.Printf("[Argus] 主域名 %s 计划解析失败: %v", apex, err)
+						continue
+					}
+					entry = scheduleEntry{spec: spec, scheduledTime: nextTime}
+					apexNextCheckMap[apex] = entry
+					log.Printf("[Argus] 主域名 %s 计划任务已排期: 规则 [%s], 下次执行时间 %s (约 %v 后)",
+						apex, spec, nextTime.Format("2006-01-02 15:04:05"), nextTime.Sub(now).Round(time.Second))
+				}
+
+				if now.After(entry.scheduledTime) {
+					// 到期触发主域名检测：先从 DNS 同步一次，再巡检所有子域名
+					nextTime, err := schedule.NextExecutionTime(spec, now)
+					if err == nil {
+						entry.scheduledTime = nextTime
+						apexNextCheckMap[apex] = entry
+					}
+					log.Printf("[Argus] 触发主域名 %s 任务计划巡检 (先同步 DNS 再巡检)", apex)
+					targetApex := apex
+					go func(a string) {
+						res, err := srv.RunApexCheckAndSync(a)
+						if err != nil {
+							log.Printf("[Argus] 主域名 %s 任务计划执行失败: %v", a, err)
+						} else if res != nil {
+							log.Printf("[Argus] 主域名 %s 任务计划执行完毕: %s", a, res.Message)
+						}
+					}(targetApex)
+				}
+			}
+
+			// 清理失效的主域名
+			for a := range apexNextCheckMap {
+				if !activeApex[a] {
+					delete(apexNextCheckMap, a)
+				}
+			}
+
+			// 2. 调度子域名
+			domains, err := database.GetAllDomains()
+			if err == nil && len(domains) > 0 {
+				currentIDs := make(map[int64]bool)
+
+				for _, d := range domains {
+					currentIDs[d.ID] = true
+					dApex := checker.GetApexDomain(d.Host)
+					apexHasCron := apexCronMap[dApex] != ""
+
+					// 若子域名无独立计划，但所属主域名有计划，则由主域名集中统筹巡检，子域名自身不在单域名调度中重复排期
+					if d.CronSpec == "" && apexHasCron {
+						delete(subNextCheckMap, d.ID)
+						continue
+					}
+
+					entry, exists := subNextCheckMap[d.ID]
+
+					if d.CronSpec != "" {
+						// 分支 A: 单个子域名拥有独立计划
+						if !exists || entry.spec != d.CronSpec {
+							nextTime, err := schedule.NextExecutionTime(d.CronSpec, now)
+							if err != nil {
+								log.Printf("[Argus] 目标 %s 独立计划解析失败: %v", d.Host, err)
+								continue
+							}
+							entry = scheduleEntry{spec: d.CronSpec, scheduledTime: nextTime}
+							subNextCheckMap[d.ID] = entry
+							log.Printf("[Argus] 目标 %s 独立计划已排期: 规则 [%s], 下次执行时间 %s (约 %v 后)",
+								d.Host, d.CronSpec, nextTime.Format("2006-01-02 15:04:05"), nextTime.Sub(now).Round(time.Second))
+						}
+
+						if now.After(entry.scheduledTime) {
+							nextTime, err := schedule.NextExecutionTime(d.CronSpec, now)
+							if err == nil {
+								entry.scheduledTime = nextTime
+								subNextCheckMap[d.ID] = entry
+							}
+							targetCopy := d
+							go func(target db.Domain) {
+								checkAndAlertSingle(&target)
+							}(targetCopy)
+						}
 					} else {
-						scheduledTime = bootTime.Add(interval)
+						// 分支 B: 无任何独立计划，默认随机一个时间（哈希错峰打散），配合系统设置的统一间隔
+						if !exists || entry.spec != "default_staggered" {
+							var minWait time.Duration = 30 * time.Second
+							var scheduledTime time.Time
+							if interval > 2*time.Minute {
+								randRange := interval - minWait
+								offset := minWait + time.Duration(hashHost(d.Host)%uint64(randRange))
+								scheduledTime = bootTime.Add(offset)
+							} else {
+								scheduledTime = bootTime.Add(interval)
+							}
+							entry = scheduleEntry{spec: "default_staggered", scheduledTime: scheduledTime}
+							subNextCheckMap[d.ID] = entry
+							log.Printf("[Argus] 目标 %s (默认错峰打散) 首次检测计划于 %s (约 %v 后)",
+								d.Host, scheduledTime.Format("15:04:05"), scheduledTime.Sub(now).Round(time.Second))
+						}
+
+						if now.After(entry.scheduledTime) {
+							nextTime := entry.scheduledTime.Add(interval)
+							if now.After(nextTime) {
+								nextTime = now.Add(interval)
+							}
+							entry.scheduledTime = nextTime
+							subNextCheckMap[d.ID] = entry
+
+							targetCopy := d
+							go func(target db.Domain) {
+								checkAndAlertSingle(&target)
+							}(targetCopy)
+						}
 					}
-					nextCheckMap[d.ID] = scheduledTime
-					log.Printf("[Argus] 目标 %s 调度已排期：首次检测计划于 %s (约 %v 后)", d.Host, scheduledTime.Format("15:04:05"), scheduledTime.Sub(now).Round(time.Second))
 				}
 
-				if now.After(scheduledTime) {
-					// 到期，触发检测并更新下一次检测时间（统一间隔）
-					nextTime := scheduledTime.Add(interval)
-					if now.After(nextTime) {
-						nextTime = now.Add(interval)
+				// 清理已被删除的域名 ID
+				for id := range subNextCheckMap {
+					if !currentIDs[id] {
+						delete(subNextCheckMap, id)
 					}
-					nextCheckMap[d.ID] = nextTime
-
-					targetCopy := d
-					go func(target db.Domain) {
-						checkAndAlertSingle(&target)
-					}(targetCopy)
 				}
 			}
 
-			// 清理已被删除的域名 ID
-			for id := range nextCheckMap {
-				if !currentIDs[id] {
-					delete(nextCheckMap, id)
-				}
-			}
-			mapMu.Unlock()
+			schedMu.Unlock()
 		}
 	}()
 

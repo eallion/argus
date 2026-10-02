@@ -78,6 +78,10 @@ const elements = {
   notificationEmptyState: document.getElementById('notification-empty-state'),
   settingNotificationMode: document.getElementById('setting-notification-mode'),
   settingNotificationBatchInterval: document.getElementById('setting-notification-batch-interval'),
+  settingNotificationBatchHour: document.getElementById('setting-notification-batch-hour'),
+  settingNotificationBatchMinute: document.getElementById('setting-notification-batch-minute'),
+  batchTimezoneBadge: document.getElementById('batch-timezone-badge'),
+  batchTimezoneHint: document.getElementById('batch-timezone-hint'),
   batchIntervalGroup: document.getElementById('batch-interval-group'),
   batchActionsBar: document.getElementById('batch-actions-bar'),
   btnFlushBatch: document.getElementById('btn-flush-batch'),
@@ -3625,9 +3629,38 @@ function populateSettingsModal() {
   if (elements.settingNotificationMode) {
     elements.settingNotificationMode.value = notifMode;
   }
-  if (elements.settingNotificationBatchInterval) {
-    elements.settingNotificationBatchInterval.value = state.settings.notification_batch_interval || '1h';
+
+  // 回填时区信息
+  const tzName = state.settings.timezone || 'Asia/Shanghai';
+  const tzOffset = state.settings.timezone_offset ? ` (${state.settings.timezone_offset})` : '';
+  if (elements.batchTimezoneBadge) {
+    elements.batchTimezoneBadge.textContent = `时区: ${tzName}${tzOffset}`;
   }
+  if (elements.batchTimezoneHint) {
+    elements.batchTimezoneHint.textContent = `每日定于此时刻汇总并推送待合并通知（基于环境变量 TZ: ${tzName} 时区）。`;
+  }
+
+  // 回填每日发送时间 HH:MM
+  const rawBatchTime = state.settings.notification_batch_time || state.settings.notification_batch_interval || '09:00';
+  let bHour = '09';
+  let bMinute = '00';
+  if (rawBatchTime && rawBatchTime.includes(':')) {
+    const parts = rawBatchTime.split(':');
+    if (parts.length === 2) {
+      bHour = parts[0].trim().padStart(2, '0');
+      bMinute = parts[1].trim().padStart(2, '0');
+    }
+  }
+  if (elements.settingNotificationBatchHour) {
+    elements.settingNotificationBatchHour.value = bHour;
+  }
+  if (elements.settingNotificationBatchMinute) {
+    elements.settingNotificationBatchMinute.value = bMinute;
+  }
+  if (elements.settingNotificationBatchInterval) {
+    elements.settingNotificationBatchInterval.value = `${bHour}:${bMinute}`;
+  }
+
   if (elements.batchIntervalGroup) {
     elements.batchIntervalGroup.classList.toggle('hidden', notifMode !== 'batch');
   }
@@ -3704,7 +3737,9 @@ elements.settingsForm.addEventListener('submit', async (e) => {
   const default_theme = document.getElementById('cfg-default-theme') ? document.getElementById('cfg-default-theme').value : 'auto';
 
   const notification_mode = elements.settingNotificationMode ? elements.settingNotificationMode.value : 'realtime';
-  const notification_batch_interval = elements.settingNotificationBatchInterval ? elements.settingNotificationBatchInterval.value : '1h';
+  const bHour = elements.settingNotificationBatchHour ? elements.settingNotificationBatchHour.value : '09';
+  const bMinute = elements.settingNotificationBatchMinute ? elements.settingNotificationBatchMinute.value : '00';
+  const notification_batch_time = `${bHour.padStart(2, '0')}:${bMinute.padStart(2, '0')}`;
 
   const payload = {
     interval,
@@ -3713,7 +3748,8 @@ elements.settingsForm.addEventListener('submit', async (e) => {
     alert_rule_mode,
     timeout,
     notification_mode,
-    notification_batch_interval,
+    notification_batch_time,
+    notification_batch_interval: notification_batch_time,
     shoutrrr_urls: shoutrrrRaw,
     apprise_enabled,
     apprise_api_url,

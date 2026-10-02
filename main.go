@@ -98,8 +98,12 @@ func main() {
 		if len(items) == 0 {
 			return 0, nil
 		}
-		intervalStr := database.GetSetting("notification_batch_interval", "1h")
-		title, body, severity := notifier.FormatSummary(items, intervalStr)
+		batchTimeStr := database.GetSetting("notification_batch_time", "")
+		if batchTimeStr == "" {
+			batchTimeStr = database.GetSetting("notification_batch_interval", "09:00")
+		}
+		loc := notifier.GetServerLocation()
+		title, body, severity := notifier.FormatSummary(items, batchTimeStr, loc)
 		n := getNotifier()
 		if n == nil {
 			return len(items), fmt.Errorf("通知组件未初始化")
@@ -712,32 +716,41 @@ func main() {
 		}
 	}()
 
-	// Background batch notification flush scheduler
+	// Background batch notification flush scheduler (按 TZ 时区每日定时发送)
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
-		lastFlushTime := time.Now()
 
 		for range ticker.C {
 			mode := database.GetSetting("notification_mode", "realtime")
 			if mode != "batch" {
 				continue
 			}
-			intervalStr := database.GetSetting("notification_batch_interval", "1h")
-			interval, err := time.ParseDuration(intervalStr)
-			if err != nil || interval < 1*time.Minute {
-				interval = 1 * time.Hour
-			}
 
-			if time.Since(lastFlushTime) >= interval {
-				lastFlushTime = time.Now()
+			batchTimeStr := database.GetSetting("notification_batch_time", "")
+			if batchTimeStr == "" {
+				batchTimeStr = database.GetSetting("notification_batch_interval", "09:00")
+			}
+			targetH, targetM, _ := notifier.ParseBatchTime(batchTimeStr)
+
+			loc := notifier.GetServerLocation()
+			now := time.Now().In(loc)
+			todayStr := now.Format("2006-01-02")
+			lastSentDate := database.GetSetting("last_batch_sent_date", "")
+
+			// 检查当前时刻是否匹配目标小时与分钟（支持 2 分钟窗口 [targetM, targetM+1] 容错）
+			isTargetWindow := now.Hour() == targetH && (now.Minute() == targetM || now.Minute() == (targetM+1)%60)
+			if isTargetWindow && lastSentDate != todayStr {
+				_ = database.SetSetting("last_batch_sent_date", todayStr)
 				if alertAggregator.Count() > 0 {
 					count, err := flushAggregated()
 					if err != nil {
 						log.Printf("[Argus] 定期合并通知推送失败 (%d 项): %v", count, err)
 					} else {
-						log.Printf("[Argus] 定期合并通知已推送，共汇总 %d 项告警", count)
+						log.Printf("[Argus] 定期合并通知已推送 (%s %02d:%02d, TZ: %s)，共汇总 %d 项告警", todayStr, targetH, targetM, loc.String(), count)
 					}
+				} else {
+					log.Printf("[Argus] 今日合并通知定时已到达 (%02d:%02d, TZ: %s)，当前无待合并告警", targetH, targetM, loc.String())
 				}
 			}
 		}

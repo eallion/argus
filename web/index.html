@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=1.0.4" />
+  <link rel="stylesheet" href="/style.css?v=1.0.5" />
   <script>
     (function() {
       try {
@@ -1065,21 +1065,109 @@ another-site.net"></textarea>
               </div>
 
               <div id="batch-interval-group" class="form-group hidden">
-                <label for="setting-notification-batch-interval">合并发送频率</label>
-                <select id="setting-notification-batch-interval" class="channel-select">
-                  <option value="10m">每 10 分钟汇总一次</option>
-                  <option value="30m">每 30 分钟汇总一次</option>
-                  <option value="1h">每 1 小时汇总一次 (推荐)</option>
-                  <option value="2h">每 2 小时汇总一次</option>
-                  <option value="6h">每 6 小时汇总一次</option>
-                  <option value="12h">每 12 小时汇总一次</option>
-                  <option value="24h">每 24 小时汇总一次 (每日摘要)</option>
-                </select>
+                <div class="label-with-badge">
+                  <label for="setting-notification-batch-hour">合并发送时间</label>
+                  <span id="batch-timezone-badge" class="badge badge-secondary" title="系统时区">时区: Asia/Shanghai</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <select id="setting-notification-batch-hour" class="channel-select" style="flex: 1;" title="小时">
+                    <option value="00">00 时</option>
+                    <option value="01">01 时</option>
+                    <option value="02">02 时</option>
+                    <option value="03">03 时</option>
+                    <option value="04">04 时</option>
+                    <option value="05">05 时</option>
+                    <option value="06">06 时</option>
+                    <option value="07">07 时</option>
+                    <option value="08">08 时</option>
+                    <option value="09" selected>09 时</option>
+                    <option value="10">10 时</option>
+                    <option value="11">11 时</option>
+                    <option value="12">12 时</option>
+                    <option value="13">13 时</option>
+                    <option value="14">14 时</option>
+                    <option value="15">15 时</option>
+                    <option value="16">16 时</option>
+                    <option value="17">17 时</option>
+                    <option value="18">18 时</option>
+                    <option value="19">19 时</option>
+                    <option value="20">20 时</option>
+                    <option value="21">21 时</option>
+                    <option value="22">22 时</option>
+                    <option value="23">23 时</option>
+                  </select>
+                  <span style="font-weight: 700; color: var(--text-muted); font-size: 1.1rem; line-height: 1;">:</span>
+                  <select id="setting-notification-batch-minute" class="channel-select" style="flex: 1;" title="分钟">
+                    <option value="00" selected>00 分</option>
+                    <option value="01">01 分</option>
+                    <option value="02">02 分</option>
+                    <option value="03">03 分</option>
+                    <option value="04">04 分</option>
+                    <option value="05">05 分</option>
+                    <option value="06">06 分</option>
+                    <option value="07">07 分</option>
+                    <option value="08">08 分</option>
+                    <option value="09">09 分</option>
+                    <option value="10">10 分</option>
+                    <option value="11">11 分</option>
+                    <option value="12">12 分</option>
+                    <option value="13">13 分</option>
+                    <option value="14">14 分</option>
+                    <option value="15">15 分</option>
+                    <option value="16">16 分</option>
+                    <option value="17">17 分</option>
+                    <option value="18">18 分</option>
+                    <option value="19">19 分</option>
+                    <option value="20">20 分</option>
+                    <option value="21">21 分</option>
+                    <option value="22">22 分</option>
+                    <option value="23">23 分</option>
+                    <option value="24">24 分</option>
+                    <option value="25">25 分</option>
+                    <option value="26">26 分</option>
+                    <option value="27">27 分</option>
+                    <option value="28">28 分</option>
+                    <option value="29">29 分</option>
+                    <option value="30">30 分</option>
+                    <option value="31">31 分</option>
+                    <option value="32">32 分</option>
+                    <option value="33">33 分</option>
+                    <option value="34">34 分</option>
+                    <option value="35">35 分</option>
+                    <option value="36">36 分</option>
+                    <option value="37">37 分</option>
+                    <option value="38">38 分</option>
+                    <option value="39">39 分</option>
+                    <option value="40">40 分</option>
+                    <option value="41">41 分</option>
+                    <option value="42">42 分</option>
+                    <option value="43">43 分</option>
+                    <option value="44">44 分</option>
+                    <option value="45">45 分</option>
+                    <option value="46">46 分</option>
+                    <option value="47">47 分</option>
+                    <option value="48">48 分</option>
+                    <option value="49">49 分</option>
+                    <option value="50">50 分</option>
+                    <option value="51">51 分</option>
+                    <option value="52">52 分</option>
+                    <option value="53">53 分</option>
+                    <option value="54">54 分</option>
+                    <option value="55">55 分</option>
+                    <option value="56">56 分</option>
+                    <option value="57">57 分</option>
+                    <option value="58">58 分</option>
+                    <option value="59">59 分</option>
+                  </select>
+                </div>
+                <span class="text-xs text-muted" id="batch-timezone-hint" style="margin-top: 0.35rem; display: block;">
+                  每日定于此时刻汇总并推送待合并通知（基于环境变量 TZ 时区）。
+                </span>
               </div>
             </div>
 
             <div id="batch-actions-bar" class="batch-actions-bar hidden" style="margin-top: 0.85rem; padding-top: 0.75rem; border-top: 1px dashed var(--border-color); display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;">
-              <span class="text-xs text-muted">队列中的待处理告警将按频率定时发出，也可手动即刻合并推送。</span>
+              <span class="text-xs text-muted">队列中的待处理告警将于每日设定时刻自动合并发出，亦可在此随时手动即刻合并推送。</span>
               <button type="button" id="btn-flush-batch" class="btn btn-secondary btn-sm" style="flex-shrink: 0;">
                 <svg class="icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -1682,6 +1770,6 @@ wecombot://bot_key"></textarea>
     <div class="global-tooltip-arrow"></div>
   </div>
 
-  <script src="/app.js?v=1.0.4"></script>
+  <script src="/app.js?v=1.0.5"></script>
 </body>
 </html>

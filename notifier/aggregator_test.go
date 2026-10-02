@@ -40,7 +40,7 @@ func TestAlertAggregator(t *testing.T) {
 	}
 
 	// 5. 格式化汇总测试
-	title, body, severity := FormatSummary(items, "1h")
+	title, body, severity := FormatSummary(items, "09:00", nil)
 	if !strings.Contains(title, "2 项域名/证书异常") {
 		t.Errorf("unexpected summary title: %s", title)
 	}
@@ -49,5 +49,15 @@ func TestAlertAggregator(t *testing.T) {
 	}
 	if !strings.Contains(body, "example.com") || !strings.Contains(body, "api.example.com") {
 		t.Errorf("summary body missing expected hosts: %s", body)
+	}
+
+	// 6. 时间解析测试
+	h, m, ok := ParseBatchTime("09:30")
+	if !ok || h != 9 || m != 30 {
+		t.Errorf("ParseBatchTime('09:30') failed: got %d:%d (ok=%v)", h, m, ok)
+	}
+	h, m, ok = ParseBatchTime("invalid")
+	if ok || h != 9 || m != 0 {
+		t.Errorf("ParseBatchTime('invalid') fallback failed: got %d:%d (ok=%v)", h, m, ok)
 	}
 }

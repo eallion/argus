@@ -2,6 +2,8 @@ package notifier
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,11 +91,73 @@ func (a *AlertAggregator) Flush() []AggregatedAlertItem {
 	return items
 }
 
+// ParseBatchTime parses time string like "09:00", "9:00", "23:59" into hour (0-23) and minute (0-59).
+func ParseBatchTime(raw string) (int, int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 9, 0, false
+	}
+	parts := strings.Split(raw, ":")
+	if len(parts) != 2 {
+		return 9, 0, false
+	}
+	h, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil {
+		return 9, 0, false
+	}
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return 9, 0, false
+	}
+	return h, m, true
+}
+
+// GetServerLocation returns the location configured by TZ environment variable, falling back to time.Local.
+func GetServerLocation() *time.Location {
+	tz := strings.TrimSpace(os.Getenv("TZ"))
+	if tz != "" {
+		if loc, err := time.LoadLocation(tz); err == nil {
+			return loc
+		}
+	}
+	return time.Local
+}
+
+// GetTimezoneInfo returns the timezone identifier (e.g. "Asia/Shanghai") and offset string (e.g. "UTC+08:00").
+func GetTimezoneInfo() (string, string) {
+	loc := GetServerLocation()
+	now := time.Now().In(loc)
+	zoneName, offsetSec := now.Zone()
+
+	sign := "+"
+	if offsetSec < 0 {
+		sign = "-"
+		offsetSec = -offsetSec
+	}
+	hours := offsetSec / 3600
+	mins := (offsetSec % 3600) / 60
+	offsetStr := fmt.Sprintf("UTC%s%02d:%02d", sign, hours, mins)
+
+	tzName := strings.TrimSpace(os.Getenv("TZ"))
+	if tzName == "" {
+		tzName = loc.String()
+	}
+	if tzName == "Local" || tzName == "" {
+		tzName = zoneName
+	}
+	return tzName, offsetStr
+}
+
 // FormatSummary generates a unified notification title and body for the aggregated batch
-func FormatSummary(items []AggregatedAlertItem, intervalStr string) (string, string, string) {
+func FormatSummary(items []AggregatedAlertItem, batchTimeStr string, loc *time.Location) (string, string, string) {
 	if len(items) == 0 {
 		return "", "", "info"
 	}
+
+	if loc == nil {
+		loc = GetServerLocation()
+	}
+	now := time.Now().In(loc)
 
 	title := fmt.Sprintf("[Argus 告警汇总] 发现 %d 项域名/证书异常 (合并通知)", len(items))
 	worstSeverity := "warning"
@@ -107,9 +171,20 @@ func FormatSummary(items []AggregatedAlertItem, intervalStr string) (string, str
 		blocks = append(blocks, block)
 	}
 
-	body := fmt.Sprintf("汇总时间: %s (周期: %s)\n异常目标总计: %d 项\n\n%s",
-		time.Now().Format("2006-01-02 15:04:05"),
-		intervalStr,
+	tzName, tzOffset := GetTimezoneInfo()
+
+	timeDesc := strings.TrimSpace(batchTimeStr)
+	if timeDesc == "" {
+		timeDesc = "每日汇总"
+	} else if strings.Contains(timeDesc, ":") {
+		timeDesc = fmt.Sprintf("每日 %s", timeDesc)
+	}
+
+	body := fmt.Sprintf("汇总时间: %s (%s, %s)\n发送时间: %s\n异常目标总计: %d 项\n\n%s",
+		now.Format("2006-01-02 15:04:05"),
+		tzName,
+		tzOffset,
+		timeDesc,
 		len(items),
 		strings.Join(blocks, "\n\n"),
 	)

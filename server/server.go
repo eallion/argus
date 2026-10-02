@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1163,7 +1164,15 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	alertRuleMode := s.db.GetSetting("alert_rule_mode", "tier_once")
 
 	notificationMode := s.db.GetSetting("notification_mode", "realtime")
-	notificationBatchInterval := s.db.GetSetting("notification_batch_interval", "1h")
+	notificationBatchTime := s.db.GetSetting("notification_batch_time", "")
+	if notificationBatchTime == "" {
+		notificationBatchTime = s.db.GetSetting("notification_batch_interval", "09:00")
+	}
+	if _, _, ok := notifier.ParseBatchTime(notificationBatchTime); !ok {
+		notificationBatchTime = "09:00"
+	}
+	tzName, tzOffset := notifier.GetTimezoneInfo()
+
 	pendingAggregated := 0
 	if s.getAggregatedCount != nil {
 		pendingAggregated = s.getAggregatedCount()
@@ -1198,7 +1207,10 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"alert_rule_mode":             alertRuleMode,
 		"timeout":                     timeout,
 		"notification_mode":           notificationMode,
-		"notification_batch_interval": notificationBatchInterval,
+		"notification_batch_time":     notificationBatchTime,
+		"notification_batch_interval": notificationBatchTime,
+		"timezone":                    tzName,
+		"timezone_offset":             tzOffset,
 		"pending_aggregated":          pendingAggregated,
 		"shoutrrr_urls":               shoutrrrURLs,
 		"apprise_available":           appriseAvailable,
@@ -1223,6 +1235,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		AlertRuleMode             string   `json:"alert_rule_mode"`
 		Timeout                   string   `json:"timeout"`
 		NotificationMode          string   `json:"notification_mode"`
+		NotificationBatchTime     string   `json:"notification_batch_time"`
 		NotificationBatchInterval string   `json:"notification_batch_interval"`
 		ShoutrrrURLs              []string `json:"shoutrrr_urls"`
 		AppriseEnabled            bool     `json:"apprise_enabled"`
@@ -1276,9 +1289,21 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.db.SetSetting("notification_mode", req.NotificationMode)
 	}
-	if req.NotificationBatchInterval != "" {
-		if _, err := time.ParseDuration(req.NotificationBatchInterval); err == nil {
-			_ = s.db.SetSetting("notification_batch_interval", req.NotificationBatchInterval)
+
+	rawBatchTime := strings.TrimSpace(req.NotificationBatchTime)
+	if rawBatchTime == "" {
+		rawBatchTime = strings.TrimSpace(req.NotificationBatchInterval)
+	}
+	if rawBatchTime != "" {
+		if h, m, ok := notifier.ParseBatchTime(rawBatchTime); ok {
+			formattedTime := fmt.Sprintf("%02d:%02d", h, m)
+			oldTime := s.db.GetSetting("notification_batch_time", "")
+			if oldTime != formattedTime {
+				// 发送时间发生变更，重置今日已发记录以使新设定及时生效
+				_ = s.db.SetSetting("last_batch_sent_date", "")
+			}
+			_ = s.db.SetSetting("notification_batch_time", formattedTime)
+			_ = s.db.SetSetting("notification_batch_interval", formattedTime)
 		}
 	}
 
@@ -2266,14 +2291,14 @@ func (s *Server) SyncDNSTasksForConfig(c *db.DNSSyncConfig) (*db.BatchImportResu
 	if err != nil {
 		errMsg := "未找到关联的凭据"
 		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
-		return nil, fmt.Errorf(errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	provider, err := dns_provider.GetProvider(p.ProviderType)
 	if err != nil {
 		errMsg := "不支持的厂商类型"
 		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
-		return nil, fmt.Errorf(errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
@@ -2288,7 +2313,7 @@ func (s *Server) SyncDNSTasksForConfig(c *db.DNSSyncConfig) (*db.BatchImportResu
 	if err != nil {
 		errMsg := "自动拉取失败: " + err.Error()
 		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
-		return nil, fmt.Errorf(errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	var rawNames []string
@@ -2318,7 +2343,7 @@ func (s *Server) SyncDNSTasksForConfig(c *db.DNSSyncConfig) (*db.BatchImportResu
 	if err != nil {
 		errMsg := "自动导入失败: " + err.Error()
 		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
-		return nil, fmt.Errorf(errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	statusMsg := fmt.Sprintf("DNS 同步完成：新增 %d 个目标，跳过 %d 个已有目标，过滤 %d 个黑名单子域名", res.Added, res.Skipped, len(blocked))

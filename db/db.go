@@ -719,7 +719,8 @@ func (d *DB) EnsureDefaultSettings() {
 		"turnstile_site_key":          "",
 		"turnstile_secret_key":         "",
 		"notification_mode":           "realtime",
-		"notification_batch_interval": "1h",
+		"notification_batch_time":     "09:00",
+		"notification_batch_interval": "09:00",
 	}
 	for k, v := range defaults {
 		var exists int

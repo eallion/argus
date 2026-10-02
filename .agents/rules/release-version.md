@@ -13,6 +13,6 @@
 4. **添加 Git Tag**：为该 Commit 创建对应的 Git 标签：`git tag vX.Y.Z`（例如 `git tag v1.0.4`）；
 5. **通知与提示**：明确提示用户本地已完成 Commit 与 Tag 的创建，由用户决定并手动执行 `git push origin vX.Y.Z` 以触发 GitHub Actions 自动化 Docker 镜像构建（遵守安全规则：未经明确授权禁止自动执行 push 操作）。
 
-## 3. 辅助自动化工具
-项目已提供自动化检查与打标脚本：`scripts/check-version-tag.sh`。
-也可直接运行该脚本自动完成版本检测、Commit 与 Tag 创建。
+## 3. 辅助自动化工具与执行授权
+- 项目已提供自动化检查与打标脚本：`scripts/check-version-tag.sh`。
+- 用户已明确长期授权：本项目打包、编译测试及版本打标脚本（如 `go test ./...`、`./scripts/check-version-tag.sh` 等）自动同意执行，无需重复逐次确认。

@@ -81,7 +81,6 @@ const elements = {
   settingNotificationBatchHour: document.getElementById('setting-notification-batch-hour'),
   settingNotificationBatchMinute: document.getElementById('setting-notification-batch-minute'),
   batchTimezoneBadge: document.getElementById('batch-timezone-badge'),
-  batchTimezoneHint: document.getElementById('batch-timezone-hint'),
   batchIntervalGroup: document.getElementById('batch-interval-group'),
   batchActionsBar: document.getElementById('batch-actions-bar'),
   btnFlushBatch: document.getElementById('btn-flush-batch'),
@@ -3630,14 +3629,16 @@ function populateSettingsModal() {
     elements.settingNotificationMode.value = notifMode;
   }
 
-  // 回填时区信息
-  const tzName = state.settings.timezone || 'Asia/Shanghai';
-  const tzOffset = state.settings.timezone_offset ? ` (${state.settings.timezone_offset})` : '';
+  // 回填服务端实际环境变量 TZ 时区信息
   if (elements.batchTimezoneBadge) {
-    elements.batchTimezoneBadge.textContent = `时区: ${tzName}${tzOffset}`;
-  }
-  if (elements.batchTimezoneHint) {
-    elements.batchTimezoneHint.textContent = `每日定于此时刻汇总并推送待合并通知（基于环境变量 TZ: ${tzName} 时区）。`;
+    const tzName = state.settings && state.settings.timezone ? state.settings.timezone.trim() : '';
+    const tzOffset = state.settings && state.settings.timezone_offset ? state.settings.timezone_offset.trim() : '';
+    if (tzName) {
+      elements.batchTimezoneBadge.textContent = tzOffset ? `时区: ${tzName} (${tzOffset})` : `时区: ${tzName}`;
+      elements.batchTimezoneBadge.classList.remove('hidden');
+    } else {
+      elements.batchTimezoneBadge.classList.add('hidden');
+    }
   }
 
   // 回填每日发送时间 HH:MM

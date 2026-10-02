@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=1.0.5" />
+  <link rel="stylesheet" href="/style.css?v=1.0.6" />
   <script>
     (function() {
       try {
@@ -1067,7 +1067,7 @@ another-site.net"></textarea>
               <div id="batch-interval-group" class="form-group hidden">
                 <div class="label-with-badge">
                   <label for="setting-notification-batch-hour">合并发送时间</label>
-                  <span id="batch-timezone-badge" class="badge badge-secondary" title="系统时区">时区: Asia/Shanghai</span>
+                  <span id="batch-timezone-badge" class="badge badge-secondary hidden" title="服务端时区"></span>
                 </div>
                 <div style="display: flex; align-items: center; gap: 0.5rem;">
                   <select id="setting-notification-batch-hour" class="channel-select" style="flex: 1;" title="小时">
@@ -1160,9 +1160,6 @@ another-site.net"></textarea>
                     <option value="59">59 分</option>
                   </select>
                 </div>
-                <span class="text-xs text-muted" id="batch-timezone-hint" style="margin-top: 0.35rem; display: block;">
-                  每日定于此时刻汇总并推送待合并通知（基于环境变量 TZ 时区）。
-                </span>
               </div>
             </div>
 
@@ -1770,6 +1767,6 @@ wecombot://bot_key"></textarea>
     <div class="global-tooltip-arrow"></div>
   </div>
 
-  <script src="/app.js?v=1.0.5"></script>
+  <script src="/app.js?v=1.0.6"></script>
 </body>
 </html>

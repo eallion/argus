@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=1.0.6" />
+  <link rel="stylesheet" href="/style.css?v=1.0.7" />
   <script>
     (function() {
       try {
@@ -628,8 +628,14 @@ test"></textarea>
               <div class="dns-preview-stats">
                 <span class="badge badge-blue">API 总记录: <strong id="preview-total-count">0</strong></span>
                 <span class="badge badge-emerald">符合待导入: <strong id="preview-allowed-count">0</strong></span>
+                <span class="badge badge-rose hidden" id="preview-deleted-badge">失效将移除: <strong id="preview-deleted-count">0</strong></span>
                 <span class="badge badge-amber">黑名单拦截: <strong id="preview-blocked-count">0</strong></span>
               </div>
+            </div>
+
+            <div id="dns-preview-deleted-box" class="dns-preview-section hidden mt-2">
+              <div class="dns-section-title text-rose">以下子域名在外部已删除或命中黑名单，同步时将从监控中移除：</div>
+              <div id="dns-preview-deleted-list" class="dns-tags-wrap"></div>
             </div>
             
             <div id="dns-preview-blocked-box" class="dns-preview-section hidden mt-2">
@@ -1767,6 +1773,6 @@ wecombot://bot_key"></textarea>
     <div class="global-tooltip-arrow"></div>
   </div>
 
-  <script src="/app.js?v=1.0.6"></script>
+  <script src="/app.js?v=1.0.7"></script>
 </body>
 </html>

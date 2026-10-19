@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"sort"
@@ -2138,15 +2139,202 @@ func (s *Server) handleFetchDNSRecords(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(allowed)
 	sort.Strings(blocked)
 
+	// 计算在本地数据库中存在、但本次 DNS API 记录中已不存在（或被黑名单过滤）的已删除子域名
+	allowedMap := make(map[string]bool, len(allowed))
+	for _, d := range allowed {
+		allowedMap[strings.ToLower(d)] = true
+	}
+
+	allDomains, _ := s.db.GetAllDomains()
+	var toDeleteDomains []string
+	for _, d := range allDomains {
+		if checker.GetApexDomain(d.Host) == domain {
+			hLower := strings.ToLower(d.Host)
+			if !allowedMap[hLower] {
+				// 根域名且开启了 check_domain 则不视为删除
+				if hLower == domain && d.CheckDomain {
+					continue
+				}
+				toDeleteDomains = append(toDeleteDomains, d.Host)
+			}
+		}
+	}
+	sort.Strings(toDeleteDomains)
+
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"total_records":   len(records),
 		"extracted_count": len(rawNames),
 		"allowed_count":   len(allowed),
 		"blocked_count":   len(blocked),
+		"deleted_count":   len(toDeleteDomains),
 		"allowed_domains": allowed,
 		"blocked_domains": blocked,
+		"deleted_domains": toDeleteDomains,
 		"records":         records,
 	})
+}
+
+// SyncDNSResult represents the detailed result of a DNS sync operation
+type SyncDNSResult struct {
+	TotalFetched   int      `json:"total_fetched"`
+	AllowedCount   int      `json:"allowed_count"`
+	BlockedCount   int      `json:"blocked_count"`
+	Added          int      `json:"added"`
+	Deleted        int      `json:"deleted"`
+	Skipped        int      `json:"skipped"`
+	NewIDs         []int64  `json:"new_ids,omitempty"`
+	DeletedDomains []string `json:"deleted_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
+	Message        string   `json:"message"`
+}
+
+// ExecuteDNSSync performs full DNS record fetch, blacklist filtering, incremental addition, and deletion of removed subdomains
+func (s *Server) ExecuteDNSSync(
+	domain string,
+	cfg dns_provider.ProviderConfig,
+	blacklist []string,
+	defaultPort string,
+	checkSSL *bool,
+	checkDomain bool,
+	syncConfigID int64,
+) (*SyncDNSResult, error) {
+	normApex := strings.TrimRight(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if normApex == "" {
+		return nil, fmt.Errorf("目标主域名不能为空")
+	}
+
+	provider, err := dns_provider.GetProvider(cfg.ProviderType)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	records, err := provider.FetchRecords(ctx, cfg, normApex)
+	if err != nil {
+		return nil, fmt.Errorf("从 DNS API 拉取解析失败: %w", err)
+	}
+
+	// 1. 提取全部有效记录子域名并去重
+	var rawNames []string
+	seen := make(map[string]bool)
+	for _, rec := range records {
+		norm := dns_provider.NormalizeDomainName(rec.Name, normApex)
+		if norm != "" && !seen[norm] {
+			seen[norm] = true
+			rawNames = append(rawNames, norm)
+		}
+	}
+
+	// 2. 结合黑名单规则进行过滤
+	allowed, blocked := dns_provider.FilterBlacklist(rawNames, normApex, blacklist)
+	allowedMap := make(map[string]bool, len(allowed))
+	for _, d := range allowed {
+		allowedMap[strings.ToLower(d)] = true
+	}
+
+	// 3. 查询当前本地数据库中属于该主域名的所有监控目标
+	allDomains, err := s.db.GetAllDomains()
+	if err != nil {
+		return nil, fmt.Errorf("获取本地监控目标失败: %w", err)
+	}
+
+	var existingInApex []db.Domain
+	for _, d := range allDomains {
+		if checker.GetApexDomain(d.Host) == normApex {
+			existingInApex = append(existingInApex, d)
+		}
+	}
+
+	// 4. 对比找出在外部已删除或命中黑名单需要移除的子域名
+	var toDeleteIDs []int64
+	var deletedDomains []string
+	for _, dom := range existingInApex {
+		hLower := strings.ToLower(dom.Host)
+		if allowedMap[hLower] {
+			continue
+		}
+		// 特殊保护：根域名本身且配置了 check_domain 或本次配置需要 check_domain，保留作为 RDAP 注册到期监控，不误删
+		if hLower == normApex && (dom.CheckDomain || checkDomain) {
+			continue
+		}
+		toDeleteIDs = append(toDeleteIDs, dom.ID)
+		deletedDomains = append(deletedDomains, dom.Host)
+	}
+
+	// 5. 执行删除失效子域名
+	if len(toDeleteIDs) > 0 {
+		if err := s.db.BatchDeleteDomains(toDeleteIDs); err != nil {
+			return nil, fmt.Errorf("删除失效监控目标失败: %w", err)
+		}
+		log.Printf("[Argus] DNS API 同步 [%s]: 成功移除 %d 个失效/已删除监控目标: %v", normApex, len(toDeleteIDs), deletedDomains)
+	}
+
+	// 6. 执行批量导入新增与已有保留
+	port := strings.TrimSpace(defaultPort)
+	if port == "" {
+		port = "443"
+	}
+	bCheckSSL := true
+	if checkSSL != nil {
+		bCheckSSL = *checkSSL
+	}
+
+	var items []db.DomainImportItem
+	for _, dom := range allowed {
+		items = append(items, db.DomainImportItem{
+			Host:        dom,
+			Port:        port,
+			CheckSSL:    &bCheckSSL,
+			CheckDomain: checkDomain,
+			IsPinned:    checker.IsRootOrWWW(dom),
+		})
+	}
+
+	res, err := s.db.BatchAddDomains(items)
+	if err != nil {
+		return nil, fmt.Errorf("导入监控目标失败: %w", err)
+	}
+
+	// 7. 新增目标立即异步触发单次检测
+	if len(res.NewIDs) > 0 && s.checkSingle != nil {
+		go func(ids []int64) {
+			for _, id := range ids {
+				dom, err := s.db.GetDomainByID(id)
+				if err == nil {
+					_, _ = s.checkSingle(dom)
+				}
+			}
+		}(res.NewIDs)
+	}
+
+	// 8. 组装同步结果信息
+	var statusMsg string
+	if len(deletedDomains) > 0 {
+		statusMsg = fmt.Sprintf("DNS 同步完成：新增 %d 个目标，移除 %d 个已删除目标，保留 %d 个已有目标，过滤 %d 个黑名单子域名",
+			res.Added, len(deletedDomains), res.Skipped, len(blocked))
+	} else {
+		statusMsg = fmt.Sprintf("DNS 同步完成：新增 %d 个目标，保留 %d 个已有目标，过滤 %d 个黑名单子域名",
+			res.Added, res.Skipped, len(blocked))
+	}
+
+	if syncConfigID > 0 {
+		_ = s.db.UpdateDNSSyncResult(syncConfigID, statusMsg, time.Now().UTC())
+	}
+
+	return &SyncDNSResult{
+		TotalFetched:   len(rawNames),
+		AllowedCount:   len(allowed),
+		BlockedCount:   len(blocked),
+		Added:          res.Added,
+		Deleted:        len(deletedDomains),
+		Skipped:        res.Skipped,
+		NewIDs:         res.NewIDs,
+		DeletedDomains: deletedDomains,
+		BlockedDomains: blocked,
+		Message:        statusMsg,
+	}, nil
 }
 
 // Sync DNS Records and import directly into Argus monitoring
@@ -2192,99 +2380,38 @@ func (s *Server) handleSyncDNSNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider, err := dns_provider.GetProvider(cfg.ProviderType)
+	var syncConfID int64
+	if syncConf != nil {
+		syncConfID = syncConf.ID
+	}
+
+	res, err := s.ExecuteDNSSync(domain, cfg, req.FetchParams.Blacklist, req.DefaultPort, req.CheckSSL, req.CheckDomain, syncConfID)
 	if err != nil {
+		if syncConf != nil {
+			_ = s.db.UpdateDNSSyncResult(syncConf.ID, err.Error(), time.Now().UTC())
+		}
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
-	defer cancel()
-
-	records, err := provider.FetchRecords(ctx, cfg, domain)
-	if err != nil {
-		if syncConf != nil {
-			_ = s.db.UpdateDNSSyncResult(syncConf.ID, "拉取失败: "+err.Error(), time.Now().UTC())
-		}
-		jsonError(w, http.StatusBadRequest, "从 DNS API 拉取解析失败: "+err.Error())
-		return
-	}
-
-	var rawNames []string
-	seen := make(map[string]bool)
-	for _, rec := range records {
-		norm := dns_provider.NormalizeDomainName(rec.Name, domain)
-		if norm != "" && !seen[norm] {
-			seen[norm] = true
-			rawNames = append(rawNames, norm)
-		}
-	}
-
-	allowed, blocked := dns_provider.FilterBlacklist(rawNames, domain, req.FetchParams.Blacklist)
-
-	port := strings.TrimSpace(req.DefaultPort)
-	if port == "" {
-		port = "443"
-	}
-
-	bCheckSSL := true
-	if req.CheckSSL != nil {
-		bCheckSSL = *req.CheckSSL
-	}
-
-	var items []db.DomainImportItem
-	for _, dom := range allowed {
-		isPinned := checker.IsRootOrWWW(dom)
-		items = append(items, db.DomainImportItem{
-			Host:        dom,
-			Port:        port,
-			CheckSSL:    &bCheckSSL,
-			CheckDomain: req.CheckDomain,
-			IsPinned:    isPinned,
-		})
-	}
-
-	res, err := s.db.BatchAddDomains(items)
-	if err != nil {
-		if syncConf != nil {
-			_ = s.db.UpdateDNSSyncResult(syncConf.ID, "导入失败: "+err.Error(), time.Now().UTC())
-		}
-		jsonError(w, http.StatusInternalServerError, "导入监控目标失败: "+err.Error())
-		return
-	}
-
-	if len(res.NewIDs) > 0 {
-		go func(ids []int64) {
-			for _, id := range ids {
-				dom, err := s.db.GetDomainByID(id)
-				if err == nil {
-					_, _ = s.checkSingle(dom)
-				}
-			}
-		}(res.NewIDs)
-	}
-
-	statusMsg := fmt.Sprintf("同步成功：新增 %d 个目标，跳过 %d 个已有目标，黑名单过滤 %d 个子域名", res.Added, res.Skipped, len(blocked))
-	if syncConf != nil {
-		_ = s.db.UpdateDNSSyncResult(syncConf.ID, statusMsg, time.Now().UTC())
-	}
-
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":         true,
-		"total_fetched":   len(rawNames),
-		"allowed_count":   len(allowed),
-		"blocked_count":   len(blocked),
+		"total_fetched":   res.TotalFetched,
+		"allowed_count":   res.AllowedCount,
+		"blocked_count":   res.BlockedCount,
 		"added":           res.Added,
+		"deleted":         res.Deleted,
 		"skipped":         res.Skipped,
-		"blocked_domains": blocked,
-		"message":         statusMsg,
+		"deleted_domains": res.DeletedDomains,
+		"blocked_domains": res.BlockedDomains,
+		"message":         res.Message,
 	})
 }
 
 // SyncDNSTasksForConfig runs DNS pull and auto-import for a single DNS sync config
-func (s *Server) SyncDNSTasksForConfig(c *db.DNSSyncConfig) (*db.BatchImportResult, error) {
+func (s *Server) SyncDNSTasksForConfig(c *db.DNSSyncConfig) (*SyncDNSResult, error) {
 	if c.IsDisabled || c.ProviderID <= 0 {
-		return &db.BatchImportResult{}, nil
+		return &SyncDNSResult{}, nil
 	}
 
 	p, err := s.db.GetDNSProviderByID(c.ProviderID)
@@ -2294,60 +2421,19 @@ func (s *Server) SyncDNSTasksForConfig(c *db.DNSSyncConfig) (*db.BatchImportResu
 		return nil, errors.New(errMsg)
 	}
 
-	provider, err := dns_provider.GetProvider(p.ProviderType)
-	if err != nil {
-		errMsg := "不支持的厂商类型"
-		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
-		return nil, errors.New(errMsg)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-	records, err := provider.FetchRecords(ctx, dns_provider.ProviderConfig{
+	cfg := dns_provider.ProviderConfig{
 		ProviderType: p.ProviderType,
 		AuthKey:      p.AuthKey,
 		AuthSecret:   p.AuthSecret,
 		ZoneID:       c.ZoneID,
-	}, c.Domain)
-	cancel()
-
-	if err != nil {
-		errMsg := "自动拉取失败: " + err.Error()
-		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
-		return nil, errors.New(errMsg)
 	}
 
-	var rawNames []string
-	seen := make(map[string]bool)
-	for _, rec := range records {
-		norm := dns_provider.NormalizeDomainName(rec.Name, c.Domain)
-		if norm != "" && !seen[norm] {
-			seen[norm] = true
-			rawNames = append(rawNames, norm)
-		}
-	}
-
-	allowed, blocked := dns_provider.FilterBlacklist(rawNames, c.Domain, c.Blacklist)
 	bCheckSSL := true
-	var items []db.DomainImportItem
-	for _, dom := range allowed {
-		items = append(items, db.DomainImportItem{
-			Host:        dom,
-			Port:        c.DefaultPort,
-			CheckSSL:    &bCheckSSL,
-			CheckDomain: c.CheckDomain,
-			IsPinned:    checker.IsRootOrWWW(dom),
-		})
-	}
-
-	res, err := s.db.BatchAddDomains(items)
+	res, err := s.ExecuteDNSSync(c.Domain, cfg, c.Blacklist, c.DefaultPort, &bCheckSSL, c.CheckDomain, c.ID)
 	if err != nil {
-		errMsg := "自动导入失败: " + err.Error()
-		_ = s.db.UpdateDNSSyncResult(c.ID, errMsg, time.Now().UTC())
-		return nil, errors.New(errMsg)
+		_ = s.db.UpdateDNSSyncResult(c.ID, err.Error(), time.Now().UTC())
+		return nil, err
 	}
-
-	statusMsg := fmt.Sprintf("DNS 同步完成：新增 %d 个目标，跳过 %d 个已有目标，过滤 %d 个黑名单子域名", res.Added, res.Skipped, len(blocked))
-	_ = s.db.UpdateDNSSyncResult(c.ID, statusMsg, time.Now().UTC())
 	return res, nil
 }
 
@@ -2377,11 +2463,12 @@ func (s *Server) SyncAllAutoDNSTasks() {
 }
 
 type ApexCheckResult struct {
-	Apex        string `json:"apex"`
-	SyncedAdded int    `json:"synced_added"`
-	TotalTarget int    `json:"total_target"`
-	CheckCount  int    `json:"check_count"`
-	Message     string `json:"message"`
+	Apex          string `json:"apex"`
+	SyncedAdded   int    `json:"synced_added"`
+	SyncedDeleted int    `json:"synced_deleted"`
+	TotalTarget   int    `json:"total_target"`
+	CheckCount    int    `json:"check_count"`
+	Message       string `json:"message"`
 }
 
 // RunApexCheckAndSync performs DNS sync first (if DNS API is configured), then checks all subdomains under apex
@@ -2393,16 +2480,17 @@ func (s *Server) RunApexCheckAndSync(apex string) (*ApexCheckResult, error) {
 
 	result := &ApexCheckResult{Apex: normApex}
 
-	// 1. 若配置了主域名同步规则且有有效 API 凭据，先从 DNS 同步一次域名并过滤黑名单
+	// 1. 若配置了主域名同步规则且有有效 API 凭据，先从 DNS 同步一次域名并过滤黑名单与移除已删除子域名
 	conf, err := s.db.GetDNSSyncConfigByDomain(normApex)
 	if err == nil && conf != nil && !conf.IsDisabled && conf.ProviderID > 0 {
 		syncRes, syncErr := s.SyncDNSTasksForConfig(conf)
 		if syncErr == nil && syncRes != nil {
 			result.SyncedAdded = syncRes.Added
+			result.SyncedDeleted = syncRes.Deleted
 		}
 	}
 
-	// 2. 加载属于该主域名的所有子域名
+	// 2. 加载属于该主域名的所有有效监控目标（此时已排除被删除的子域名）
 	allDomains, err := s.db.GetAllDomains()
 	if err != nil {
 		return nil, err
@@ -2438,8 +2526,15 @@ func (s *Server) RunApexCheckAndSync(apex string) (*ApexCheckResult, error) {
 	wg.Wait()
 
 	result.CheckCount = len(apexTargets)
-	result.Message = fmt.Sprintf("已完成 %s 巡检：同步新增 %d 个目标，检测 %d 个监控目标", normApex, result.SyncedAdded, result.CheckCount)
+	if result.SyncedDeleted > 0 {
+		result.Message = fmt.Sprintf("已完成 %s 巡检：同步新增 %d 个目标，移除 %d 个失效目标，检测 %d 个监控目标",
+			normApex, result.SyncedAdded, result.SyncedDeleted, result.CheckCount)
+	} else {
+		result.Message = fmt.Sprintf("已完成 %s 巡检：同步新增 %d 个目标，检测 %d 个监控目标",
+			normApex, result.SyncedAdded, result.CheckCount)
+	}
 	return result, nil
 }
+
 
 

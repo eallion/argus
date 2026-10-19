@@ -645,6 +645,31 @@ func (d *DB) DeleteDomain(id int64) error {
 	return err
 }
 
+func (d *DB) BatchDeleteDomains(ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("DELETE FROM domains WHERE id = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, id := range ids {
+		if _, err := stmt.Exec(id); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (d *DB) UpdateDomainCheckResult(
 	id int64,
 	sslDaysLeft int, sslExpiresAt *time.Time, sslIssuer, sslStatus, sslError, sslDetails string,

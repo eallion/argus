@@ -106,9 +106,13 @@ const elements = {
   previewTotalCount: document.getElementById('preview-total-count'),
   previewAllowedCount: document.getElementById('preview-allowed-count'),
   previewBlockedCount: document.getElementById('preview-blocked-count'),
+  previewDeletedBadge: document.getElementById('preview-deleted-badge'),
+  previewDeletedCount: document.getElementById('preview-deleted-count'),
   dnsPreviewAllowedList: document.getElementById('dns-preview-allowed-list'),
   dnsPreviewBlockedBox: document.getElementById('dns-preview-blocked-box'),
   dnsPreviewBlockedList: document.getElementById('dns-preview-blocked-list'),
+  dnsPreviewDeletedBox: document.getElementById('dns-preview-deleted-box'),
+  dnsPreviewDeletedList: document.getElementById('dns-preview-deleted-list'),
   dnsProvidersList: document.getElementById('dns-providers-list'),
   dnsSyncConfigsList: document.getElementById('dns-sync-configs-list'),
   btnAddDNSProvider: document.getElementById('btn-add-dns-provider'),
@@ -4174,7 +4178,27 @@ if (elements.btnDnsPreview) {
         elements.dnsPreviewBlockedList.innerHTML = '';
       }
 
-      showToast(`拉取成功：共获取 ${res.total_records} 条记录，${res.allowed_count} 个待导入，${res.blocked_count} 个命中黑名单跳过`, 'info');
+      // 外部已删除或命中黑名单将被删除的域名
+      if (res.deleted_domains && res.deleted_domains.length > 0) {
+        if (elements.previewDeletedBadge) elements.previewDeletedBadge.classList.remove('hidden');
+        if (elements.previewDeletedCount) elements.previewDeletedCount.textContent = res.deleted_count;
+        if (elements.dnsPreviewDeletedBox) {
+          elements.dnsPreviewDeletedBox.classList.remove('hidden');
+          elements.dnsPreviewDeletedList.innerHTML = res.deleted_domains.map(d =>
+            `<span class="dns-tag-item dns-tag-blocked" style="background: rgba(244, 63, 94, 0.15); color: var(--color-rose); border-color: rgba(244, 63, 94, 0.3);" title="该域名在 DNS 解析中已不存在或被黑名单过滤，同步时将从监控中移除">${escapeHtml(d)} (将移除)</span>`
+          ).join('');
+        }
+      } else {
+        if (elements.previewDeletedBadge) elements.previewDeletedBadge.classList.add('hidden');
+        if (elements.previewDeletedCount) elements.previewDeletedCount.textContent = '0';
+        if (elements.dnsPreviewDeletedBox) {
+          elements.dnsPreviewDeletedBox.classList.add('hidden');
+          elements.dnsPreviewDeletedList.innerHTML = '';
+        }
+      }
+
+      const delMsg = (res.deleted_count > 0) ? `，${res.deleted_count} 个失效目标将移除` : '';
+      showToast(`拉取成功：共获取 ${res.total_records} 条记录，${res.allowed_count} 个有效待导入${delMsg}，${res.blocked_count} 个命中黑名单跳过`, 'info');
     } catch (err) {
       showToast(err.message || '拉取解析记录失败', 'error');
     } finally {

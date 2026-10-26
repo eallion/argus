@@ -39,6 +39,7 @@ func TestExecuteDNSSync_DeleteSubdomains(t *testing.T) {
 		records: []dns_provider.Record{
 			{Name: "example.com", Type: "A", Value: "1.1.1.1"},
 			{Name: "www.example.com", Type: "CNAME", Value: "example.com"},
+			{Name: "legacy-sub.example.com", Type: "A", Value: "1.2.3.3"},
 			{Name: "new-sub.example.com", Type: "A", Value: "1.2.3.4"},
 			{Name: "blocked-sub.example.com", Type: "A", Value: "1.2.3.5"},
 		},
@@ -62,13 +63,15 @@ func TestExecuteDNSSync_DeleteSubdomains(t *testing.T) {
 	// 预先向数据库添加目标：
 	// 1. example.com (根域名，check_domain = true)
 	// 2. www.example.com (有效子域名)
-	// 3. deleted-sub.example.com (外部已删除的子域名，mock中不存在)
-	// 4. blocked-sub.example.com (将被黑名单过滤的子域名)
-	// 5. other.org (另一个主域名的子域名，不应被触碰)
+	// 3. legacy-sub.example.com (有效子域名，历史遗留开启了 check_domain = true)
+	// 4. deleted-sub.example.com (外部已删除的子域名，mock中不存在)
+	// 5. blocked-sub.example.com (将被黑名单过滤的子域名)
+	// 6. other.org (另一个主域名的子域名，不应被触碰)
 	bTrue := true
 	_, err = database.BatchAddDomains([]db.DomainImportItem{
 		{Host: "example.com", Port: "443", CheckSSL: &bTrue, CheckDomain: true},
 		{Host: "www.example.com", Port: "443", CheckSSL: &bTrue, CheckDomain: false},
+		{Host: "legacy-sub.example.com", Port: "443", CheckSSL: &bTrue, CheckDomain: true},
 		{Host: "deleted-sub.example.com", Port: "443", CheckSSL: &bTrue, CheckDomain: false},
 		{Host: "blocked-sub.example.com", Port: "443", CheckSSL: &bTrue, CheckDomain: false},
 		{Host: "api.other.org", Port: "443", CheckSSL: &bTrue, CheckDomain: false},
@@ -104,8 +107,10 @@ func TestExecuteDNSSync_DeleteSubdomains(t *testing.T) {
 	}
 
 	hosts := make(map[string]bool)
+	checkDomainMap := make(map[string]bool)
 	for _, d := range all {
 		hosts[d.Host] = true
+		checkDomainMap[d.Host] = d.CheckDomain
 	}
 
 	if !hosts["example.com"] {
@@ -114,11 +119,28 @@ func TestExecuteDNSSync_DeleteSubdomains(t *testing.T) {
 	if !hosts["www.example.com"] {
 		t.Errorf("www.example.com should be kept")
 	}
+	if !hosts["legacy-sub.example.com"] {
+		t.Errorf("legacy-sub.example.com should be kept")
+	}
 	if !hosts["new-sub.example.com"] {
 		t.Errorf("new-sub.example.com should be added")
 	}
 	if !hosts["api.other.org"] {
 		t.Errorf("api.other.org should not be affected")
+	}
+
+	// 验证 CheckDomain 状态：子域名默认不检测注册日期，仅根域名检测
+	if !checkDomainMap["example.com"] {
+		t.Errorf("example.com (apex domain) should have CheckDomain=true")
+	}
+	if checkDomainMap["new-sub.example.com"] {
+		t.Errorf("new-sub.example.com (subdomain) should have CheckDomain=false")
+	}
+	if checkDomainMap["legacy-sub.example.com"] {
+		t.Errorf("legacy-sub.example.com (subdomain) should have CheckDomain corrected to false")
+	}
+	if checkDomainMap["www.example.com"] {
+		t.Errorf("www.example.com should have CheckDomain=false")
 	}
 
 	if hosts["deleted-sub.example.com"] {
@@ -135,8 +157,8 @@ func TestExecuteDNSSync_DeleteSubdomains(t *testing.T) {
 		t.Fatalf("RunApexCheckAndSync failed: %v", err)
 	}
 
-	if apexRes.CheckCount != 3 {
-		t.Errorf("expected 3 targets checked under example.com, got %d", apexRes.CheckCount)
+	if apexRes.CheckCount != 4 {
+		t.Errorf("expected 4 targets checked under example.com, got %d", apexRes.CheckCount)
 	}
 
 	for _, checked := range checkedDomains {

@@ -623,6 +623,15 @@ func (d *DB) UpdateDomainPin(id int64, pinned bool) error {
 	return err
 }
 
+func (d *DB) UpdateDomainCheckDomain(id int64, checkDomain bool) error {
+	val := 0
+	if checkDomain {
+		val = 1
+	}
+	_, err := d.db.Exec("UPDATE domains SET check_domain = ?, updated_at = ? WHERE id = ?", val, time.Now().UTC(), id)
+	return err
+}
+
 func (d *DB) ToggleDomainPin(id int64) (bool, error) {
 	var current int
 	err := d.db.QueryRow("SELECT is_pinned FROM domains WHERE id = ?", id).Scan(&current)

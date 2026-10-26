@@ -1,6 +1,7 @@
 ---
 name: release-manager
-description: 自动化版本发布管理 Agent。专门负责监控 web/index.html 静态资源缓存版本号 (?v=X.Y.Z) 变更，自动执行 git add、git commit (release: vx.x.x) 及 git tag (vx.x.x) 的版本发布流程。
+description: >-
+  自动化版本发布管理 Agent。专门负责监控 web/index.html 静态资源缓存版本号 (?v=X.Y.Z) 变更，自动执行 git add、git commit (release: vx.x.x) 及 git tag (vx.x.x) 的版本发布流程。
 ---
 
 # Release Manager 智能体指令

@@ -2253,6 +2253,11 @@ func (s *Server) ExecuteDNSSync(
 	for _, dom := range existingInApex {
 		hLower := strings.ToLower(dom.Host)
 		if allowedMap[hLower] {
+			// 子域名默认不检测域名注册日期/到期：若存量子域名历史开启了 check_domain，自动校正关闭
+			if !checker.IsApexDomain(dom.Host) && dom.CheckDomain {
+				dom.CheckDomain = false
+				_ = s.db.UpdateDomainCheckDomain(dom.ID, false)
+			}
 			continue
 		}
 		// 特殊保护：根域名本身且配置了 check_domain 或本次配置需要 check_domain，保留作为 RDAP 注册到期监控，不误删
@@ -2283,11 +2288,14 @@ func (s *Server) ExecuteDNSSync(
 
 	var items []db.DomainImportItem
 	for _, dom := range allowed {
+		// 子域名默认不检测注册日期/到期，仅主域名检测
+		isApex := checker.IsApexDomain(dom)
+		domCheckDomain := isApex && checkDomain
 		items = append(items, db.DomainImportItem{
 			Host:        dom,
 			Port:        port,
 			CheckSSL:    &bCheckSSL,
-			CheckDomain: checkDomain,
+			CheckDomain: domCheckDomain,
 			IsPinned:    checker.IsRootOrWWW(dom),
 		})
 	}

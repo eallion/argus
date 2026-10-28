@@ -77,3 +77,44 @@ func TestGetApexDomain(t *testing.T) {
 	}
 }
 
+func TestEvaluateDomainStatus(t *testing.T) {
+	now := time.Now()
+	maxTier := 30
+
+	// 1. 超过最大阶梯天数：正常
+	daysLeft, status := EvaluateDomainStatus(now.Add(100*24*time.Hour), maxTier)
+	if status != "healthy" || daysLeft < 99 {
+		t.Errorf("expected healthy, got status=%s, daysLeft=%d", status, daysLeft)
+	}
+
+	// 2. 关注临期 (<= 30 天)
+	_, status = EvaluateDomainStatus(now.Add(25*24*time.Hour), maxTier)
+	if status != "info" {
+		t.Errorf("expected info, got status=%s", status)
+	}
+
+	// 3. 注意 (<= 15 天)
+	_, status = EvaluateDomainStatus(now.Add(12*24*time.Hour), maxTier)
+	if status != "notice" {
+		t.Errorf("expected notice, got status=%s", status)
+	}
+
+	// 4. 橙色警告 (<= 7 天)
+	_, status = EvaluateDomainStatus(now.Add(5*24*time.Hour), maxTier)
+	if status != "warning" {
+		t.Errorf("expected warning, got status=%s", status)
+	}
+
+	// 5. 极危红色警告 (<= 3 天)
+	_, status = EvaluateDomainStatus(now.Add(2*24*time.Hour), maxTier)
+	if status != "critical" {
+		t.Errorf("expected critical, got status=%s", status)
+	}
+
+	// 6. 已过期
+	_, status = EvaluateDomainStatus(now.Add(-2*24*time.Hour), maxTier)
+	if status != "expired" {
+		t.Errorf("expected expired, got status=%s", status)
+	}
+}
+

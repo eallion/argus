@@ -602,24 +602,21 @@ func main() {
 		if dom.CheckDomain {
 			dRes := checker.CheckDomain(dom.Host, timeout)
 			if dRes.Error != nil {
-				domainStatus = "error"
-				domainError = dRes.Error.Error()
+				if dom.DomainExpiresAt != nil && !dom.DomainExpiresAt.IsZero() {
+					// 检测前已有过期时间：检测失败时保留原过期时间与计算状态，不标记为失败，下次巡检再次尝试
+					domainExpiresAt = dom.DomainExpiresAt
+					domainDaysLeft, domainStatus = checker.EvaluateDomainStatus(*dom.DomainExpiresAt, maxTier)
+					domainError = dom.DomainError
+					log.Printf("[Argus] 目标 %s 域名过期检测失败: %v, 保留原到期时间 %s (剩余 %d 天, 状态: %s)",
+						dom.Host, dRes.Error, dom.DomainExpiresAt.Format("2006-01-02"), domainDaysLeft, domainStatus)
+				} else {
+					domainStatus = "error"
+					domainError = dRes.Error.Error()
+				}
 			} else {
 				domainExpiresAt = &dRes.ExpiresAt
-				domainDaysLeft = dRes.DaysLeft
-				if dRes.IsExpired || dRes.DaysLeft < 0 {
-					domainStatus = "expired"
-				} else if dRes.DaysLeft <= 3 {
-					domainStatus = "critical"
-				} else if dRes.DaysLeft <= 7 {
-					domainStatus = "warning"
-				} else if dRes.DaysLeft <= 15 {
-					domainStatus = "notice"
-				} else if dRes.DaysLeft <= maxTier {
-					domainStatus = "info"
-				} else {
-					domainStatus = "healthy"
-				}
+				domainDaysLeft, domainStatus = checker.EvaluateDomainStatus(dRes.ExpiresAt, maxTier)
+				domainError = ""
 			}
 		}
 

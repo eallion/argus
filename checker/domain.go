@@ -397,3 +397,21 @@ func GetApexDomain(input string) string {
 	}
 	return strings.Join(parts[len(parts)-2:], ".")
 }
+
+// EvaluateDomainStatus evaluates domain expiration days left and health tier based on expiry time.
+func EvaluateDomainStatus(expiresAt time.Time, maxTier int) (int, string) {
+	daysLeft := int(time.Until(expiresAt).Hours() / 24)
+	isExpired := daysLeft < 0 || time.Now().After(expiresAt)
+	if isExpired || daysLeft < 0 {
+		return daysLeft, "expired"
+	} else if daysLeft <= 3 {
+		return daysLeft, "critical"
+	} else if daysLeft <= 7 {
+		return daysLeft, "warning"
+	} else if daysLeft <= 15 {
+		return daysLeft, "notice"
+	} else if daysLeft <= maxTier {
+		return daysLeft, "info"
+	}
+	return daysLeft, "healthy"
+}

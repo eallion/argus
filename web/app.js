@@ -2376,7 +2376,9 @@ function attachGroupEvents() {
       e.stopPropagation();
       const apex = btn.dataset.apex;
       if (!apex) return;
-      btn.classList.add('spinning');
+      const icon = btn.querySelector('svg');
+      if (icon) icon.classList.add('spinning');
+      btn.disabled = true;
       try {
         showToast(`正在从 DNS 同步并巡检 ${apex} 下的监控目标...`, 'info');
         const res = await api(`/api/apex/${encodeURIComponent(apex)}/check`, { method: 'POST' });
@@ -2385,7 +2387,8 @@ function attachGroupEvents() {
       } catch (err) {
         showToast(err.message || `巡检 ${apex} 失败`, 'error');
       } finally {
-        btn.classList.remove('spinning');
+        if (icon) icon.classList.remove('spinning');
+        btn.disabled = false;
       }
     });
   });
@@ -2415,7 +2418,9 @@ function attachActionEvents() {
   document.querySelectorAll('.btn-action-check').forEach(btn => {
     btn.addEventListener('click', async () => {
       const id = btn.dataset.id;
-      btn.classList.add('spinning');
+      const icon = btn.querySelector('svg');
+      if (icon) icon.classList.add('spinning');
+      btn.disabled = true;
       try {
         const updated = await api(`/api/domains/${id}/check`, { method: 'POST' });
         showToast(`已刷新 ${updated.host} 检测结果`, 'success');
@@ -2423,7 +2428,8 @@ function attachActionEvents() {
       } catch (err) {
         // Handled in api()
       } finally {
-        btn.classList.remove('spinning');
+        if (icon) icon.classList.remove('spinning');
+        btn.disabled = false;
       }
     });
   });
@@ -5174,8 +5180,16 @@ function initNotificationCenter() {
 
   // 刷新按钮
   if (elements.btnRefreshNotifications) {
-    elements.btnRefreshNotifications.addEventListener('click', () => {
-      loadNotifications();
+    elements.btnRefreshNotifications.addEventListener('click', async () => {
+      const icon = elements.btnRefreshNotifications.querySelector('svg');
+      if (icon) icon.classList.add('spinning');
+      try {
+        await loadNotifications();
+      } finally {
+        setTimeout(() => {
+          if (icon) icon.classList.remove('spinning');
+        }, 400);
+      }
     });
   }
 

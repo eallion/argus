@@ -1339,11 +1339,21 @@ body {
 }
 
 @keyframes spin {
+  from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
-.spinning {
+.spinning,
+button.spinning svg,
+.btn.spinning svg {
   animation: spin 0.8s linear infinite;
+  transform-origin: center center;
+}
+
+/* 按钮自身不旋转，仅内部图标旋转 */
+button.spinning,
+.btn.spinning {
+  animation: none !important;
 }
 
 /* 模态框与关闭按钮规范修复 */
